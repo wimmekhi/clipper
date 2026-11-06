@@ -1,0 +1,83 @@
+name: build
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: deps
+        run: pip install -r requirements.txt pyinstaller pillow
+      - name: ffmpeg (带 libass + x264)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-8.1.zip -OutFile ff.zip
+          Expand-Archive ff.zip -DestinationPath ff
+          New-Item -ItemType Directory -Force bin | Out-Null
+          Copy-Item (Get-ChildItem ff -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName bin/
+          bin/ffmpeg.exe -hide_banner -version | Select-Object -First 1
+      - name: build
+        run: pyinstaller clipper.spec --noconfirm
+      - name: selftest
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist -Filter *.exe | Select-Object -First 1
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList "--selftest","selftest.txt" -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - name: package
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}"
+          New-Item -ItemType Directory -Force pkg | Out-Null
+          Copy-Item (Get-ChildItem dist -Filter *.exe | Select-Object -First 1).FullName pkg/
+          Copy-Item 使用说明.md pkg/使用说明.txt
+          Compress-Archive -Path pkg/* -DestinationPath "clipper-$v-windows-x64.zip"
+          Get-FileHash "clipper-$v-windows-x64.zip" -Algorithm SHA256
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: "clipper-*-windows-x64.zip" }
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with: { files: "clipper-*-windows-x64.zip" }
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: deps
+        run: pip install -r requirements.txt pyinstaller pillow
+      - name: ffmpeg (静态版，带 libass + x264)
+        run: |
+          mkdir -p bin
+          curl -fL -o ff.zip https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip
+          unzip -o ff.zip -d bin
+          chmod +x bin/ffmpeg
+          bin/ffmpeg -hide_banner -version | head -1
+          otool -L bin/ffmpeg
+      - name: build
+        run: pyinstaller clipper.spec --noconfirm
+      - name: selftest
+        run: |
+          QT_QPA_PLATFORM=offscreen "dist/台词切片编辑器.app/Contents/MacOS/台词切片编辑器" --selftest selftest.txt || (cat selftest.txt; exit 1)
+          cat selftest.txt
+      - name: package
+        run: |
+          V="${{ github.ref_name }}"
+          codesign --force --deep -s - "dist/台词切片编辑器.app"
+          cd dist && ditto -c -k --sequesterRsrc --keepParent "台词切片编辑器.app" "../clipper-$V-macOS-arm64.zip" && cd ..
+          shasum -a 256 "clipper-$V-macOS-arm64.zip"
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: "clipper-*-macOS-arm64.zip" }
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with: { files: "clipper-*-macOS-arm64.zip" }

@@ -1,0 +1,4 @@
+PySide6>=6.7
+numpy>=1.26
+faster-whisper>=1.1
+# Mac(Apple 芯片) 想用 GPU 跑对齐再装：mlx-whisper
