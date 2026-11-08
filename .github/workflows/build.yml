@@ -55,7 +55,9 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - name: deps
-        run: pip install -r requirements.txt pyinstaller pillow
+        run: |
+          pip install -r requirements.txt pyinstaller pillow
+          python -c "import mlx.core as mx, mlx_whisper; print('mlx', mx.__version__, 'metal', mx.metal.is_available())"
       - name: ffmpeg (静态版，带 libass + x264)
         run: |
           mkdir -p bin
@@ -66,10 +68,16 @@ jobs:
           otool -L bin/ffmpeg
       - name: build
         run: pyinstaller clipper.spec --noconfirm
-      - name: selftest
+      - name: selftest（含 mlx：metallib、Metal、tiny 模型真实识别一句话）
         run: |
-          QT_QPA_PLATFORM=offscreen "dist/台词切片编辑器.app/Contents/MacOS/台词切片编辑器" --selftest selftest.txt || (cat selftest.txt; exit 1)
+          say -o smoke.aiff "Whose turn is it to do the dishes tonight?"
+          bin/ffmpeg -v error -i smoke.aiff -ac 1 -ar 16000 -f s16le smoke.raw
+          du -sh "dist/台词切片编辑器.app"
+          ls -la "dist/台词切片编辑器.app/Contents/Frameworks/mlx/lib/" || true
+          QT_QPA_PLATFORM=offscreen "dist/台词切片编辑器.app/Contents/MacOS/台词切片编辑器" --selftest selftest.txt --mlx-smoke "$PWD/smoke.raw" || (cat selftest.txt; exit 1)
           cat selftest.txt
+          grep -q "OK   mlx.metallib" selftest.txt
+          grep -q "OK   mlx 对齐冒烟" selftest.txt
       - name: package
         run: |
           V="${{ github.ref_name }}"

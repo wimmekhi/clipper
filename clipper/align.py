@@ -2,7 +2,7 @@
 
 - 每集只跑一次，结果写到 媒体库/.clipper/align/<集>.json（在移动硬盘上，换电脑直接用）。
 - 字幕时间只当「大概在哪」的锚点；偏移会随集内漂移，用最近若干条的偏移中位数动态跟踪。
-- 引擎：Mac(Apple 芯片) 装了 mlx-whisper 就用它（走 GPU）；否则用 faster-whisper（CPU）。
+- 引擎：Mac(Apple 芯片) 优先 mlx-whisper（Metal GPU，打包版已内置）；不可用或出错自动退回 faster-whisper（CPU）。
 """
 from __future__ import annotations
 
@@ -32,14 +32,45 @@ def load_audio(video: Path) -> np.ndarray:
 
 # ---------------- 识别引擎 ----------------
 
+_MLX_BROKEN: str | None = None     # 本次运行里 mlx 出过错就记下原因，后面直接走 CPU
+LAST_ENGINE = ""                    # 最近一次实际用的引擎（写进日志/对齐结果）
+
+
+def is_apple_silicon() -> bool:
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
 def default_engine() -> str:
-    if platform.system() == "Darwin" and platform.machine() == "arm64":
+    if is_apple_silicon() and not _MLX_BROKEN:
         try:
             import mlx_whisper  # noqa: F401
             return "mlx"
+        except Exception as ex:  # noqa
+            _mark_mlx_broken(f"导入失败 {ex!r}")
+    return "faster"
+
+
+def _mark_mlx_broken(why: str):
+    global _MLX_BROKEN
+    _MLX_BROKEN = why[:200]
+    print(f"[clipper] mlx-whisper 不可用，改用 faster-whisper(CPU)：{_MLX_BROKEN}", flush=True)
+
+
+def mlx_device() -> str:
+    """'GPU（Apple M5）' 或 'CPU（没有 Metal）'。"""
+    import mlx.core as mx
+    if not mx.metal.is_available():
+        return "CPU（没有 Metal）"
+    name = ""
+    for fn in (getattr(mx, "device_info", None), getattr(mx.metal, "device_info", None)):
+        try:
+            if fn:
+                name = fn().get("device_name", "")
+                if name:
+                    break
         except Exception:
             pass
-    return "faster"
+    return f"GPU（{name or 'Metal'}）"
 
 
 _MODEL_CACHE: dict = {}
@@ -50,30 +81,50 @@ def _use_mirror(on: bool):
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 
+def mlx_repo(model: str) -> str:
+    if "/" in model:
+        return model
+    if model.startswith("large-v3-turbo"):
+        return "mlx-community/whisper-large-v3-turbo"
+    return f"mlx-community/whisper-{model}-mlx"
+
+
+def transcribe_mlx(audio: np.ndarray, model: str) -> list[dict]:
+    import mlx_whisper
+    res = mlx_whisper.transcribe(audio, path_or_hf_repo=mlx_repo(model), language="en", word_timestamps=True,
+                                 condition_on_previous_text=False, verbose=None)
+    words = []
+    for seg in res.get("segments", []):
+        for w in seg.get("words", []) or []:
+            words.append(dict(w=w["word"].strip(), start=round(float(w["start"]), 3),
+                              end=round(float(w["end"]), 3), p=round(float(w.get("probability", 1)), 3)))
+    return words
+
+
 def transcribe(audio: np.ndarray, model: str = "small", engine: str | None = None, mirror=True,
                progress=None) -> list[dict]:
-    """返回 [{w,start,end,p}]"""
+    """返回 [{w,start,end,p}]。Apple 芯片优先 mlx-whisper（GPU），出错自动退回 faster-whisper（CPU）。"""
+    global LAST_ENGINE
     _use_mirror(mirror)
     engine = engine or default_engine()
+    if engine == "mlx" and _MLX_BROKEN:
+        engine = "faster"
     total = len(audio) / SR
     words: list[dict] = []
     if engine == "mlx":
-        import mlx_whisper
-        if "/" in model:
-            repo = model
-        elif model.startswith("large-v3-turbo"):
-            repo = "mlx-community/whisper-large-v3-turbo"
-        else:
-            repo = f"mlx-community/whisper-{model}-mlx"
-        res = mlx_whisper.transcribe(audio, path_or_hf_repo=repo, language="en", word_timestamps=True,
-                                     condition_on_previous_text=False, verbose=None)
-        for seg in res.get("segments", []):
-            for w in seg.get("words", []) or []:
-                words.append(dict(w=w["word"].strip(), start=float(w["start"]), end=float(w["end"]),
-                                  p=float(w.get("probability", 1))))
-        if progress:
-            progress(1.0)
-        return words
+        try:
+            dev = mlx_device()
+            words = transcribe_mlx(audio, model)
+            LAST_ENGINE = f"mlx-whisper · {dev}"
+            print(f"[clipper] 对齐引擎：{LAST_ENGINE}", flush=True)
+            if progress:
+                progress(1.0)
+            return words
+        except Exception as ex:  # noqa
+            _mark_mlx_broken(f"运行失败 {ex!r}")
+            words = []
+    LAST_ENGINE = "faster-whisper · CPU" + (f"（mlx 不可用：{_MLX_BROKEN[:60]}）" if _MLX_BROKEN and is_apple_silicon() else "")
+    print(f"[clipper] 对齐引擎：{LAST_ENGINE}", flush=True)
     from faster_whisper import WhisperModel
     key = (model,)
     if key not in _MODEL_CACHE:
@@ -284,8 +335,8 @@ def align_media(lib, media_row, model="small", engine=None, mirror=True, progres
     offs = [m["a_start"] - c["start"] for m, c in zip(mapped, cues) if m["a_start"] is not None]
     summary = (f"对上 {len(ok)}/{len(cues)} 条"
                + (f"，偏移 {min(offs):+.1f}～{max(offs):+.1f}s" if offs else "")
-               + f"，用时 {time.time()-t0:.0f}s")
-    data = dict(version=1, key=key, engine=engine or default_engine(), model=model, duration=dur,
+               + f"，用时 {time.time()-t0:.0f}s · {LAST_ENGINE}")
+    data = dict(version=1, key=key, engine=LAST_ENGINE, model=model, duration=dur,
                 created=time.time(), summary=summary, words=words, cues=mapped)
     f = lib.align_file(key)
     tmp = f.with_suffix(".tmp")

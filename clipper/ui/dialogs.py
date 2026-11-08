@@ -64,7 +64,7 @@ class SettingsDialog(QDialog):
         self.auto_align = QCheckBox("视频入库后自动在后台对齐"); self.auto_align.setChecked(settings.get("auto_align", True))
         fa.addRow(self.auto_align)
         self.engine = QComboBox()
-        self.engine.addItem("自动（Mac 装了 mlx-whisper 用 GPU，否则 CPU）", "")
+        self.engine.addItem("自动（Apple 芯片 Mac 用 mlx GPU，出错或 Windows 用 CPU）", "")
         self.engine.addItem("faster-whisper（CPU）", "faster")
         self.engine.addItem("mlx-whisper（Mac Apple 芯片 GPU）", "mlx")
         i = self.engine.findData(settings.get("align_engine", ""))

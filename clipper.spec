@@ -14,10 +14,19 @@ for pkg in ("faster_whisper", "ctranslate2", "onnxruntime"):
     d, b, h = collect_all(pkg)
     datas += d; binaries += b; hidden += h
 
-excludes = ["tkinter", "matplotlib", "IPython", "pytest", "mlx", "mlx_whisper", "torch", "scipy",
+# Apple 芯片：带上 mlx-whisper（GPU 对齐）。其他平台不带，并排除 mlx 与 scipy
+import runpy
+mlx_hidden, mlx_datas, mlx_bins = runpy.run_path("installer/mlx_bundle.py")["collect_mlx_whisper"]()
+hidden += mlx_hidden; datas += mlx_datas; binaries += mlx_bins
+
+excludes = ["tkinter", "matplotlib", "IPython", "pytest", "torch", "torchaudio", "torchvision",
+            "mlx_whisper.torch_whisper", "transformers",
             "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtQml", "PySide6.QtQuick",
             "PySide6.Qt3DCore", "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf",
             "PySide6.QtDesigner", "PySide6.QtBluetooth", "PySide6.QtLocation", "PySide6.QtPositioning"]
+
+if not mlx_hidden:
+    excludes += ["mlx", "mlx_whisper", "scipy"]
 
 a = Analysis(["run.py"], pathex=["."], binaries=binaries, datas=datas, hiddenimports=hidden,
              excludes=excludes, noarchive=False)
