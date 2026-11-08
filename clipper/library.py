@@ -53,7 +53,92 @@ CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
 """
 
 _EP = re.compile(r"[Ss](\d{1,2})[ ._-]*[Ee](\d{1,3})")
+_EPX = re.compile(r"(?<![\dA-Za-z])(\d{1,2})x(\d{2,3})(?!\d)")
 _YEAR = re.compile(r"\((\d{4})\)")
+_JUNK = re.compile(r"(?i)(^|[ ._-])(sample|trailer|featurette)([ ._-]|$)")
+_TAGS_BI = re.compile(r"(?i)双语|中英|英中|简英|繁英|英简|英繁|chs[&+._-]?eng|cht[&+._-]?eng|eng[&+._-]?ch[st]|zh[&+_-]en|en[&+_-]zh|chi[&+._-]?eng")
+_TAGS_EN = re.compile(r"(?i)(^|[ ._\-\[(])(en|eng|english|英文|英语|英)([ ._\-\])]|$)")
+_TAGS_ZH = re.compile(r"(?i)(^|[ ._\-\[(])(zh|chs|cht|chi|zho|sc|tc|gb|big5|简体|繁体|中文|简|繁|zh-cn|zh-tw|zh-hans|zh-hant)([ ._\-\])]|$)")
+_TAGS_TRAD = re.compile(r"(?i)cht|繁|big5|\btc\b|zh-tw|hant")
+_LANG_TAIL = re.compile(r"(?i)(\.(zh|chs|cht|chi|zho|sc|tc|en|eng|default|forced|sdh|zh-cn|zh-tw|chs&eng|cht&eng|简体|繁体|英文|双语))+$")
+
+
+def _episode(name: str):
+    m = _EP.search(name) or _EPX.search(name)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _strip_lang_tail(stem: str) -> str:
+    return _LANG_TAIL.sub("", stem)
+
+
+def _video_rank(p: Path):
+    s = str(p)
+    try:
+        size = p.stat().st_size
+    except OSError:
+        size = 1 << 62
+    return (0 if "压制" in s else 1, 0 if p.suffix.lower() == ".mp4" else 1, size)
+
+
+def _sniff(p: Path) -> str:
+    """看字幕内容：bi / en / zh。只读前 64 KB。"""
+    try:
+        raw = p.open("rb").read(65536)
+    except OSError:
+        return "?"
+    for enc in ("utf-8-sig", "utf-16", "gb18030"):
+        try:
+            t = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        t = raw.decode("latin-1")
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", t))
+    lat = len(re.findall(r"[A-Za-z]{3,}", re.sub(r"\{[^}]*\}|Dialogue:|Style:|Format:|\\N", " ", t)))
+    if cjk > 50 and lat > 50:
+        return "bi"
+    if cjk > 50:
+        return "zh"
+    return "en" if lat > 20 else "?"
+
+
+def _sub_lang(p: Path) -> str:
+    n = p.name
+    if _TAGS_BI.search(n):
+        return "bi"
+    en, zh = bool(_TAGS_EN.search(n)), bool(_TAGS_ZH.search(n))
+    if en and zh:
+        return "bi"
+    if en:
+        return "en"
+    if zh:
+        return "zh"
+    return _sniff(p)
+
+
+def _pick_subs(cands: list[Path]):
+    """返回 (主字幕, 中文字幕)。主字幕：双语 > 英文 > 不明；同级 .srt 优先，简体优先，路径短的优先。"""
+    if not cands:
+        return None, None
+    tagged = [(p, _sub_lang(p)) for p in cands]
+    def rk(x):
+        p, _ = x
+        return (1 if _TAGS_TRAD.search(p.name) else 0, 0 if p.suffix.lower() == ".srt" else 1, len(str(p)))
+    main = None
+    for want in ("bi", "en", "?"):
+        pool = [x for x in tagged if x[1] == want]
+        if pool:
+            main = min(pool, key=rk)[0]
+            break
+    zh = None
+    zpool = [x for x in tagged if x[1] == "zh"]
+    if zpool and (main is None or _sub_lang(main) != "bi"):
+        zh = min(zpool, key=rk)[0]
+    if main is None and zh is not None:   # 只有中文字幕：也收进来，能搜中文
+        main, zh = zh, None
+    return main, zh
 
 
 class Library:
@@ -96,31 +181,48 @@ class Library:
 
     # ---------- 扫描 ----------
     def discover(self) -> dict[str, dict]:
-        """找出所有「一集」：同目录同名的视频与字幕。"""
-        items: dict[str, dict] = {}
+        """找出所有「一集」。
+
+        剧集：同一个顶层文件夹（=剧名）里，按文件名里的 S01E02 / 1x02 认集，视频和字幕在哪个子目录、
+        叫什么名字都行（字幕组发布包、压制版另放一个文件夹也能配上）。一集有多个字幕时按语言挑：
+        双语 > 英文 > 不明；纯中文的单独作译文。一集有多个视频时：路径带「压制」优先，再 mp4，再文件小的。
+        电影/认不出集数的：同目录同名配对（旧规则）。
+        """
+        eps: dict[str, dict] = {}
+        loose: dict[str, dict] = {}
         for p in self.root.rglob("*"):
             if DATA_DIR in p.parts or p.name.startswith(".") or not p.is_file():
                 continue
             ext = p.suffix.lower()
-            stem = p.name[: -len(p.suffix)]
-            lang = ""
-            m = re.search(r"\.(zh|chs|cht|chi|zho|sc|tc|en|eng)$", stem, re.I)
-            if ext in SUB_EXT and m:
-                lang = m.group(1).lower()
-                stem = stem[: m.start()]
-            key = (p.parent / stem).relative_to(self.root).as_posix()
-            it = items.setdefault(key, {})
-            if ext in VIDEO_EXT:
-                it["video"] = p
-            elif ext in SUB_EXT:
-                if lang in ("zh", "chs", "cht", "chi", "zho", "sc", "tc"):
-                    it.setdefault("sub_zh", p)
-                else:
-                    # 同名优先 .srt，其次 .ass；带 .en 后缀的也算英文/主字幕
-                    cur = it.get("sub")
-                    if cur is None or (cur.suffix.lower() != ".srt" and ext == ".srt"):
-                        it["sub"] = p
-        return {k: v for k, v in items.items() if "sub" in v or "video" in v}
+            if ext not in VIDEO_EXT and ext not in SUB_EXT:
+                continue
+            if ext in VIDEO_EXT and _JUNK.search(p.name):
+                continue
+            rel = p.relative_to(self.root)
+            ep = _episode(p.name)
+            if ep and len(rel.parts) >= 2:
+                key = f"{rel.parts[0]}/S{ep[0]:02d}E{ep[1]:02d}"
+                bucket = eps.setdefault(key, {"v": [], "s": []})
+            else:
+                stem = p.name[: -len(p.suffix)]
+                if ext in SUB_EXT:
+                    stem = _strip_lang_tail(stem)
+                key = (p.parent / stem).relative_to(self.root).as_posix()
+                bucket = loose.setdefault(key, {"v": [], "s": []})
+            bucket["v" if ext in VIDEO_EXT else "s"].append(p)
+        items = {}
+        for key, b in list(eps.items()) + list(loose.items()):
+            it = {}
+            if b["v"]:
+                it["video"] = min(b["v"], key=_video_rank)
+            main, zh = _pick_subs(b["s"])
+            if main:
+                it["sub"] = main
+            if zh:
+                it["sub_zh"] = zh
+            if it:
+                items[key] = it
+        return items
 
     @staticmethod
     def parse_key(key: str):

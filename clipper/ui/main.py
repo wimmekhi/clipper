@@ -29,7 +29,11 @@ APP = "台词切片编辑器"
 PAGE = 60
 
 QSS = """
-QMainWindow, QWidget { font-size: 13px; }
+QMainWindow, QWidget { font-size: 13px; color: #111827; }
+QCheckBox, QLabel, QRadioButton { color: #111827; }
+QTreeWidget, QListWidget, QComboBox, QSpinBox, QDoubleSpinBox { color: #111827; background: #fff; }
+QHeaderView::section { background: #F9FAFB; color: #374151; border: none; border-bottom: 1px solid #E5E7EB; padding: 4px 6px; }
+QPushButton { color: #111827; }
 QMainWindow { background: #F3F4F6; }
 QDockWidget::title { background: #F9FAFB; padding: 5px 8px; border-bottom: 1px solid #E5E7EB; font-weight: 600; }
 QLineEdit { border: 1px solid #D1D5DB; border-radius: 6px; padding: 6px 8px; background: #fff; }
@@ -744,10 +748,41 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
+def light_palette(app):
+    """不跟随系统深色模式：固定用浅色配色，否则 Mac 深色模式下字是白的、背景是浅的，看不见。"""
+    from PySide6.QtGui import QPalette, QColor
+    app.setStyle("Fusion")
+    p = QPalette()
+    C = QPalette.ColorRole
+    for role, c in [(C.Window, "#F3F4F6"), (C.WindowText, "#111827"), (C.Base, "#FFFFFF"),
+                    (C.AlternateBase, "#F9FAFB"), (C.Text, "#111827"), (C.Button, "#FFFFFF"),
+                    (C.ButtonText, "#111827"), (C.BrightText, "#DC2626"), (C.Highlight, "#2563EB"),
+                    (C.HighlightedText, "#FFFFFF"), (C.ToolTipBase, "#FFFFFF"), (C.ToolTipText, "#111827"),
+                    (C.PlaceholderText, "#9CA3AF"), (C.Link, "#2563EB"), (C.Light, "#FFFFFF"),
+                    (C.Midlight, "#E5E7EB"), (C.Mid, "#D1D5DB"), (C.Dark, "#9CA3AF"), (C.Shadow, "#6B7280")]:
+        p.setColor(role, QColor(c))
+    for role in (C.WindowText, C.Text, C.ButtonText):
+        p.setColor(QPalette.ColorGroup.Disabled, role, QColor("#9CA3AF"))
+    app.setPalette(p)
+    try:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    except Exception:
+        pass
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP)
     app.setOrganizationName("local33")
+    light_palette(app)
+    # 只允许开一个：防止任何意外重启把 Dock 撑满
+    from PySide6.QtCore import QLockFile, QDir
+    lock = QLockFile(QDir.tempPath() + "/clipper-local33.lock")
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(100):
+        QMessageBox.information(None, APP, "台词切片编辑器已经开着了。")
+        sys.exit(0)
+    app._single_lock = lock
     from PySide6.QtGui import QIcon
     if icon_path().exists():
         app.setWindowIcon(QIcon(str(icon_path())))
