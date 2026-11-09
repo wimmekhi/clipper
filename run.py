@@ -4,6 +4,11 @@ import os
 import sys
 
 # 打包版必须先调：否则下载模型/进度条用到的多进程锁会用本程序路径再启动一个自己（Dock 里一串图标）
+# 无控制台的打包版（Win 的 exe、可能还有 Mac .app）里 sys.stdout/stderr 是 None，
+# 下模型时 tqdm 往 stderr 写进度就会抛 'NoneType' object has no attribute 'write'，对齐全挂。
+for _n in ("stdout", "stderr"):
+    if getattr(sys, _n) is None:
+        setattr(sys, _n, open(os.devnull, "w", encoding="utf-8"))
 multiprocessing.freeze_support()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
