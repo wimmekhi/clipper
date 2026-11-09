@@ -64,13 +64,42 @@ def _mlx_checks(chk, smoke_wav=None):
             from clipper import align
             raw = Path(smoke_wav).read_bytes()   # 16 kHz 单声道 s16le 裸数据
             audio = np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0
-            words = align.transcribe_mlx(audio, "tiny")
+            steps = []
+            path = align.ensure_model("mlx", "tiny", mirror=False, progress=lambda f, t: steps.append(t))
+            prog = []
+            words = align.transcribe_mlx(audio, "tiny", path, progress=prog.append)
             txt = " ".join(w["w"] for w in words).lower()
             if "turn" not in txt or not all(w["end"] >= w["start"] for w in words):
                 raise RuntimeError(f"识别结果不对：{txt!r}")
+            if not prog or prog[-1] < 0.99:
+                raise RuntimeError(f"识别进度没回报：{prog[-3:]}")
             dev = "GPU" if mx.metal.is_available() else "CPU 设备（无 Metal，降级）"
-            return f"{dev}，{len(words)} 个词带时间：{txt} [{words[0]['start']:.2f}-{words[-1]['end']:.2f}s]"
+            return (f"{dev}，{len(words)} 个词带时间：{txt} [{words[0]['start']:.2f}-{words[-1]['end']:.2f}s]，"
+                    f"进度回报 {len(prog)} 次")
         chk("mlx 对齐冒烟(tiny)", smoke)
+
+
+def _faster_smoke(chk, smoke_wav=None):
+    """faster-whisper：下载 tiny（不走镜像）→ 加载 → 识别，进度回调要有。"""
+    def run():
+        import numpy as np
+        from pathlib import Path
+        from clipper import align
+        if smoke_wav:
+            audio = np.frombuffer(Path(smoke_wav).read_bytes(), np.int16).astype(np.float32) / 32768.0
+        else:
+            t = np.arange(16000 * 3) / 16000
+            audio = (0.1 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        prog = []
+        words = align.transcribe(audio, model="tiny", engine="faster", mirror=False,
+                                 progress=lambda f, t="": prog.append((f, t)))
+        if not prog or prog[-1][0] < 0.99:
+            raise RuntimeError(f"进度没走完：{prog[-3:]}")
+        txt = " ".join(w["w"] for w in words).lower()
+        if smoke_wav and "turn" not in txt:
+            raise RuntimeError(f"识别结果不对：{txt!r}")
+        return f"{align.LAST_ENGINE}，{len(words)} 个词：{txt[:60]}"
+    chk("faster 对齐冒烟(tiny)", run)
 
 
 def selftest(out, smoke_wav=None):
@@ -98,6 +127,7 @@ def selftest(out, smoke_wav=None):
         app = QApplication.instance() or QApplication([])
         QMediaPlayer()
         import clipper.ui.main  # noqa
+        import clipper.ui.aligncenter  # noqa
         return "ok"
     chk("qt+multimedia+ui", qt)
     def mp_lock():
@@ -109,6 +139,8 @@ def selftest(out, smoke_wav=None):
         return "ok"
     chk("multiprocessing lock", mp_lock)
     _mlx_checks(chk, smoke_wav)
+    if os.environ.get("CLIPPER_SMOKE") or smoke_wav:
+        _faster_smoke(chk, smoke_wav)
     if tools.check() is not None:
         ok = False
     with open(out, "w", encoding="utf-8") as fh:

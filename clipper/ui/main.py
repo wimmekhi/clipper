@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         self.cur = None            # 当前预览的 hit
         self.cur_span = None
         self.align_worker = None
+        self.align_center = None
         self.export_workers = []
         self._wave_token = 0
         self._wave_workers = []
@@ -165,10 +166,11 @@ class MainWindow(QMainWindow):
         self.al_bar = QProgressBar(); self.al_bar.setRange(0, 1000); self.al_bar.setTextVisible(False)
         self.al_bar.setFixedHeight(6)
         self.al_btn = QPushButton("暂停"); self.al_btn.clicked.connect(self._toggle_align)
+        self.al_center_btn = QPushButton("对齐中心…"); self.al_center_btn.clicked.connect(self.open_align_center)
         self.al_log = QListWidget(); self.al_log.setMaximumHeight(120)
         self.al_log.setStyleSheet("font-size:11px;color:#6B7280;")
         av.addWidget(self.al_lb); av.addWidget(self.al_bar)
-        ah = QHBoxLayout(); ah.addStretch(1); ah.addWidget(self.al_btn); av.addLayout(ah)
+        ah = QHBoxLayout(); ah.addWidget(self.al_center_btn); ah.addStretch(1); ah.addWidget(self.al_btn); av.addLayout(ah)
         av.addWidget(self.al_log)
         self.d_align = self._dock("后台对齐", aw, Qt.LeftDockWidgetArea, "dock_align")
         # 预览
@@ -270,6 +272,9 @@ class MainWindow(QMainWindow):
         fm.addSeparator()
         a = QAction("设置…", self); a.setShortcut(QKeySequence.Preferences); a.triggered.connect(self.open_settings)
         fm.addAction(a)
+        am = m.addMenu("对齐")
+        a = QAction("对齐中心…", self); a.setShortcut("Ctrl+L"); a.triggered.connect(self.open_align_center)
+        am.addAction(a)
         vm = m.addMenu("视图")
         for d in (self.d_lib, self.d_align, self.d_prev, self.d_cut, self.d_ctx, self.d_pack, self.d_tasks):
             vm.addAction(d.toggleViewAction())
@@ -299,6 +304,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP, err)
         if self.align_worker:
             self.align_worker.stop(); self.align_worker.wait(3000); self.align_worker = None
+        if self.align_center:
+            self.align_center.close(); self.align_center.deleteLater(); self.align_center = None
         self.lib = Library(root)
         self.searcher = Searcher(self.lib)
         self.qs.setValue("root", root)
@@ -355,9 +362,11 @@ class MainWindow(QMainWindow):
         return dict(align_model=g("align_model", "small"), align_engine=g("align_engine", ""),
                     hf_mirror=g("hf_mirror", True), auto_align=g("auto_align", True))
 
-    def start_align(self):
-        if not self.lib or not self.lib_settings()["auto_align"]:
-            self.al_lb.setText("自动对齐已关闭（设置里可打开）")
+    def start_align(self, force=False):
+        if not self.lib:
+            return
+        if not force and not self.lib_settings()["auto_align"]:
+            self.al_lb.setText("自动对齐已关闭（可在「对齐中心」手动开始）")
             return
         if self.align_worker and self.align_worker.isRunning():
             self.align_worker.settings = self.lib_settings()
@@ -367,10 +376,24 @@ class MainWindow(QMainWindow):
         self.align_worker.status.connect(self._align_status)
         self.align_worker.episode_done.connect(self._align_done)
         self.align_worker.idle.connect(self._align_idle)
+        self.align_worker.crashed.connect(lambda m: self.al_lb.setText("对齐线程出错，打开「对齐中心」看详情"))
         self.align_worker.start()
+        if self.align_center:
+            self.align_center.attach(self.align_worker)
 
-    def _align_status(self, key, f, done, todo):
-        self.al_lb.setText(f"正在对齐：{key}\n已完成 {done} 集，还剩 {todo} 集")
+    def open_align_center(self):
+        if not self.lib:
+            return
+        from .aligncenter import AlignCenter
+        if self.align_center is None:
+            self.align_center = AlignCenter(self)
+        else:
+            self.align_center.fill_shows(); self.align_center.reload()
+            self.align_center.attach(self.align_worker)
+        self.align_center.show(); self.align_center.raise_(); self.align_center.activateWindow()
+
+    def _align_status(self, key, f, text, done, todo):
+        self.al_lb.setText(f"正在对齐：{key}\n{text}\n已完成 {done} 集，还剩 {todo} 集")
         self.al_bar.setValue(int(f * 1000))
 
     def _align_done(self, key, msg):

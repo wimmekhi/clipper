@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 
 def frozen() -> bool:

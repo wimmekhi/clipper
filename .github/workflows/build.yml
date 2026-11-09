@@ -30,6 +30,7 @@ jobs:
         shell: pwsh
         run: |
           $exe = Get-ChildItem dist -Filter *.exe | Select-Object -First 1
+          $env:CLIPPER_SMOKE = "1"
           $p = Start-Process -FilePath $exe.FullName -ArgumentList "--selftest","selftest.txt" -Wait -PassThru
           Get-Content selftest.txt
           if ($p.ExitCode -ne 0) { exit 1 }
@@ -78,6 +79,7 @@ jobs:
           cat selftest.txt
           grep -q "OK   mlx.metallib" selftest.txt
           grep -q "OK   mlx 对齐冒烟" selftest.txt
+          grep -q "OK   faster 对齐冒烟" selftest.txt
       - name: package
         run: |
           V="${{ github.ref_name }}"

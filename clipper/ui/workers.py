@@ -33,10 +33,11 @@ class ScanWorker(QThread):
 
 
 class AlignWorker(QThread):
-    """一直在后台：有没对齐的集就一集一集跑，用户不用管。"""
-    status = Signal(str, float, int, int)     # 当前集, 进度, 已完成, 待处理
-    episode_done = Signal(str, str)           # key, 摘要/错误
+    """一直在后台：有没对齐的集就一集一集跑。'queued' 的（对齐中心里点了「先跑这些」）优先。"""
+    status = Signal(str, float, str, int, int)   # 当前集, 进度, 步骤文字, 已完成, 待处理
+    episode_done = Signal(str, str)              # key, 摘要/错误
     idle = Signal()
+    crashed = Signal(str)
 
     def __init__(self, root, settings: dict):
         super().__init__()
@@ -45,6 +46,7 @@ class AlignWorker(QThread):
         self._pause = threading.Event()
         self._stop = threading.Event()
         self._kick = threading.Event()
+        self.current = ""
 
     def pause(self, on: bool):
         if on:
@@ -65,9 +67,22 @@ class AlignWorker(QThread):
         self._kick.set()
 
     def run(self):
+        try:
+            self._run()
+        except Exception as ex:  # noqa  线程不能悄悄死掉
+            msg = f"{ex!r}\n{traceback.format_exc()[-1500:]}"
+            try:
+                align.log("对齐线程出错：" + msg)
+            except Exception:
+                pass
+            self.crashed.emit(msg)
+
+    def _run(self):
         lib = Library(self.root)
+        align.LOG_FILE = lib.data / "align.log"
         lib.db.execute("UPDATE media SET align_status='none' WHERE align_status='running'")
         lib.db.commit()
+        align.log(f"对齐线程启动，媒体库 {self.root}，设置 {self.settings}")
         while not self._stop.is_set():
             if self._pause.is_set():
                 self._kick.wait(2)
@@ -78,6 +93,7 @@ class AlignWorker(QThread):
                 "AND rel_sub IS NOT NULL ORDER BY (align_status='queued') DESC, show, season, episode LIMIT 1"
             ).fetchone()
             if not row:
+                self.current = ""
                 self.idle.emit()
                 self._kick.wait(30)
                 self._kick.clear()
@@ -85,23 +101,31 @@ class AlignWorker(QThread):
             done = lib.db.execute("SELECT COUNT(*) FROM media WHERE align_status='done'").fetchone()[0]
             todo = lib.db.execute("SELECT COUNT(*) FROM media WHERE align_status IN ('none','queued') "
                                   "AND rel_video IS NOT NULL AND rel_sub IS NOT NULL").fetchone()[0]
-            key = row["key"]
-            lib.db.execute("UPDATE media SET align_status='running' WHERE id=?", (row["id"],))
+            key = self.current = row["key"]
+            lib.db.execute("UPDATE media SET align_status='running', align_msg=NULL WHERE id=?", (row["id"],))
             lib.db.commit()
-            self.status.emit(key, 0.0, done, todo)
+            self.status.emit(key, 0.0, "开始…", done, todo)
+            last = [0.0]
+
+            def prog(f, text="", key=key, done=done, todo=todo):
+                now = time.time()
+                if now - last[0] >= 0.3 or f >= 1.0:
+                    last[0] = now
+                    self.status.emit(key, float(f), text, done, todo)
             try:
                 d = align.align_media(
                     lib, row, model=self.settings.get("align_model", "small"),
                     engine=self.settings.get("align_engine") or None,
-                    mirror=self.settings.get("hf_mirror", True),
-                    progress=lambda f: self.status.emit(key, f, done, todo))
+                    mirror=self.settings.get("hf_mirror", True), progress=prog)
                 self.episode_done.emit(key, d["summary"])
             except Exception as ex:
+                align.log(f"失败 {key}：{ex!r}\n{traceback.format_exc()[-1500:]}")
                 lib.db.execute("UPDATE media SET align_status='error', align_msg=? WHERE id=?",
-                               (str(ex)[:300], row["id"]))
+                               (str(ex)[:500], row["id"]))
                 lib.db.commit()
-                self.episode_done.emit(key, "失败：" + str(ex)[:200])
+                self.episode_done.emit(key, "失败：" + str(ex)[:300])
                 time.sleep(1)
+        self.current = ""
 
 
 class ExportWorker(QThread):
