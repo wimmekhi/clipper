@@ -6,8 +6,8 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSettings, QTimer, QUrl, QSize
-from PySide6.QtGui import QAction, QKeySequence, QShortcut, QFont, QDesktopServices
+from PySide6.QtCore import Qt, QSettings, QTimer, QUrl, QSize, QPoint
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut, QFont, QDesktopServices
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
@@ -21,7 +21,7 @@ from ..paths import VERSION, icon_path
 from ..library import Library
 from ..search import Searcher, TIER_ORIG, TIER_NEAR, TIER_FUNC
 from ..export import Style
-from .widgets import ResultCard, WaveformBar, fmt_ms, highlight_html, TIMING_TEXT
+from .widgets import ResultCard, WaveformBar, fmt_ms, highlight_html, TIMING_TEXT, FlowLayout
 from .workers import ScanWorker, AlignWorker, ExportWorker, WaveWorker, UpdateCheck, UpdateDownload
 from .dialogs import SettingsDialog, ExportDialog
 
@@ -48,10 +48,11 @@ QTabBar::tab:selected { color: #2563EB; border-bottom: 2px solid #2563EB; }
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, autostart=True):
         super().__init__()
         self.setWindowTitle(f"{APP} {VERSION}")
         self.resize(1440, 900)
+        self._autostart = autostart
         self.qs = QSettings("local33", "clipper")
         tools.set_paths(self.qs.value("ffmpeg", "") or None)
         self.lib: Library | None = None
@@ -79,7 +80,9 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geo)
         self.rescan_timer = QTimer(self, interval=5 * 60 * 1000, timeout=self.rescan)
         root = self.qs.value("root", "")
-        if root and Path(root).exists():
+        if not autostart:
+            pass
+        elif root and Path(root).exists():
             QTimer.singleShot(50, lambda: self.open_library(root))
         else:
             QTimer.singleShot(50, self._first_run)
@@ -98,7 +101,7 @@ class MainWindow(QMainWindow):
         b = QPushButton("搜索"); b.setObjectName("primary"); b.clicked.connect(self.do_search)
         row.addWidget(b)
         v.addLayout(row)
-        opts = QHBoxLayout()
+        opts = FlowLayout(spacing=8)
         self.c_exact = QCheckBox("精确"); self.c_exact.setToolTip("不做词形变化（loved 不算 love）")
         self.c_order = QCheckBox("严格顺序"); self.c_order.setToolTip("词必须按顺序连在一起；* 或 ... 表示中间可以有几个词")
         self.c_single = QCheckBox("只看单人"); self.c_single.setChecked(True)
@@ -106,20 +109,19 @@ class MainWindow(QMainWindow):
         for c in (self.c_exact, self.c_order, self.c_single, self.c_video):
             c.toggled.connect(lambda _=False: self.do_search() if self.q.text().strip() else None)
             opts.addWidget(c)
-        opts.addSpacing(16)
-        opts.addWidget(QLabel("作品"))
-        self.f_show = QComboBox(); self.f_show.setMinimumWidth(180)
+        def pair(text, w):
+            box = QWidget(); hl = QHBoxLayout(box); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(4)
+            hl.addWidget(QLabel(text)); hl.addWidget(w)
+            opts.addWidget(box)
+        self.f_show = QComboBox(); self.f_show.setMinimumWidth(140)
         self.f_show.currentIndexChanged.connect(lambda _: self.do_search() if self.q.text().strip() else None)
-        opts.addWidget(self.f_show)
-        opts.addWidget(QLabel("季"))
+        pair("作品", self.f_show)
         self.f_season = QSpinBox(); self.f_season.setRange(0, 99); self.f_season.setSpecialValueText("全部")
         self.f_season.valueChanged.connect(lambda _: self.do_search() if self.q.text().strip() else None)
-        opts.addWidget(self.f_season)
-        opts.addWidget(QLabel("最长"))
+        pair("季", self.f_season)
         self.f_maxdur = QDoubleSpinBox(); self.f_maxdur.setRange(0, 60); self.f_maxdur.setValue(8)
         self.f_maxdur.setSuffix(" 秒"); self.f_maxdur.setSpecialValueText("不限")
-        opts.addWidget(self.f_maxdur)
-        opts.addStretch(1)
+        pair("最长", self.f_maxdur)
         v.addLayout(opts)
         self.tabs = QTabBar()
         for t in ("全部", TIER_ORIG, TIER_NEAR, TIER_FUNC):
@@ -151,18 +153,22 @@ class MainWindow(QMainWindow):
         self.root_lb = QLabel("未选择媒体库"); self.root_lb.setWordWrap(True)
         self.root_lb.setStyleSheet("color:#6B7280;font-size:11px;")
         lv.addWidget(self.root_lb)
-        hb = QHBoxLayout()
+        hb = FlowLayout()
         b1 = QPushButton("选择文件夹"); b1.clicked.connect(self.choose_root)
         b2 = QPushButton("重新扫描"); b2.clicked.connect(self.rescan)
         hb.addWidget(b1); hb.addWidget(b2); lv.addLayout(hb)
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(["作品", "集数", "已对齐"])
         self.tree.setColumnWidth(0, 130); self.tree.setColumnWidth(1, 44)
         self.tree.itemDoubleClicked.connect(self._tree_pick)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_menu)
+        self.tree.setToolTip("右键作品：对齐这部作品")
         lv.addWidget(self.tree, 1)
         self.d_lib = self._dock("媒体库", lw, Qt.LeftDockWidgetArea, "dock_lib")
         # 后台对齐
         aw = QWidget(); av = QVBoxLayout(aw); av.setContentsMargins(8, 6, 8, 6)
-        self.al_lb = QLabel("后台对齐：未开始"); self.al_lb.setWordWrap(True)
+        self.al_lb = QLabel("手动对齐：右键媒体库里的作品，或打开对齐中心选集"); self.al_lb.setWordWrap(True)
         self.al_bar = QProgressBar(); self.al_bar.setRange(0, 1000); self.al_bar.setTextVisible(False)
         self.al_bar.setFixedHeight(6)
         self.al_btn = QPushButton("暂停"); self.al_btn.clicked.connect(self._toggle_align)
@@ -170,12 +176,12 @@ class MainWindow(QMainWindow):
         self.al_log = QListWidget(); self.al_log.setMaximumHeight(120)
         self.al_log.setStyleSheet("font-size:11px;color:#6B7280;")
         av.addWidget(self.al_lb); av.addWidget(self.al_bar)
-        ah = QHBoxLayout(); ah.addWidget(self.al_center_btn); ah.addStretch(1); ah.addWidget(self.al_btn); av.addLayout(ah)
+        ah = FlowLayout(); ah.addWidget(self.al_center_btn); ah.addWidget(self.al_btn); av.addLayout(ah)
         av.addWidget(self.al_log)
-        self.d_align = self._dock("后台对齐", aw, Qt.LeftDockWidgetArea, "dock_align")
+        self.d_align = self._dock("对齐", aw, Qt.LeftDockWidgetArea, "dock_align")
         # 预览
         pw = QWidget(); pv = QVBoxLayout(pw); pv.setContentsMargins(6, 6, 6, 6)
-        self.video = QVideoWidget(); self.video.setMinimumSize(320, 180)
+        self.video = QVideoWidget(); self.video.setMinimumSize(160, 90)
         self.video.setStyleSheet("background:#000;")
         self.player = QMediaPlayer(self); self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio); self.player.setVideoOutput(self.video)
@@ -187,7 +193,7 @@ class MainWindow(QMainWindow):
         self.sub_zh = QLabel(""); self.sub_zh.setAlignment(Qt.AlignCenter); self.sub_zh.setWordWrap(True)
         self.sub_zh.setStyleSheet("font-size:13px;color:#6B7280;")
         pv.addWidget(self.sub_en); pv.addWidget(self.sub_zh)
-        ctl = QHBoxLayout()
+        ctl = FlowLayout()
         self.b_play = QPushButton("播放本句"); self.b_play.clicked.connect(self.play_clip)
         b_prev = QPushButton("上一条"); b_prev.clicked.connect(lambda: self.step(-1))
         b_next = QPushButton("下一条"); b_next.clicked.connect(lambda: self.step(1))
@@ -199,7 +205,9 @@ class MainWindow(QMainWindow):
         self.c_loop = QCheckBox("连播")
         for x in (b_prev, self.b_play, b_next):
             ctl.addWidget(x)
-        ctl.addStretch(1); ctl.addWidget(QLabel("倍速")); ctl.addWidget(self.speed); ctl.addWidget(self.c_loop)
+        sp = QWidget(); sl = QHBoxLayout(sp); sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(4)
+        sl.addWidget(QLabel("倍速")); sl.addWidget(self.speed); sl.addWidget(self.c_loop)
+        ctl.addWidget(sp)
         pv.addLayout(ctl)
         self.d_prev = self._dock("预览", pw, Qt.RightDockWidgetArea, "dock_preview")
         # 切点
@@ -211,12 +219,12 @@ class MainWindow(QMainWindow):
         self.cut_lb = QLabel(""); self.cut_lb.setStyleSheet("font-size:11px;color:#374151;")
         self.cut_lb.setWordWrap(True)
         cv.addWidget(self.cut_lb)
-        ch = QHBoxLayout()
+        ch = FlowLayout()
         bt = QPushButton("试听切段"); bt.clicked.connect(self.play_clip)
         bs = QPushButton("保存微调"); bs.clicked.connect(self.save_cut)
         br = QPushButton("恢复自动"); br.clicked.connect(self.reset_cut)
-        ch.addWidget(bt); ch.addWidget(bs); ch.addWidget(br); ch.addStretch(1)
-        ch.addWidget(QLabel("拖两端调整，吸附词边界；按住 Shift 自由拖"))
+        ch.addWidget(bt); ch.addWidget(bs); ch.addWidget(br)
+        self.wave.setToolTip("拖两端调整，吸附词边界；按住 Shift 自由拖")
         cv.addLayout(ch)
         self.d_cut = self._dock("切点", cw, Qt.RightDockWidgetArea, "dock_cut")
         # 上下文
@@ -233,11 +241,10 @@ class MainWindow(QMainWindow):
         self.pack_list = QListWidget(); self.pack_list.setWordWrap(True)
         self.pack_list.itemDoubleClicked.connect(self._pack_pick)
         kv.addWidget(self.pack_list, 1)
-        kb = QHBoxLayout()
+        kb = FlowLayout()
         for t, fn in (("上移", lambda: self._pack_move(-1)), ("下移", lambda: self._pack_move(1)),
                       ("移除", self._pack_remove)):
             b = QPushButton(t); b.clicked.connect(fn); kb.addWidget(b)
-        kb.addStretch(1)
         be = QPushButton("导出此包"); be.setObjectName("primary"); be.clicked.connect(self.export_pack)
         kb.addWidget(be)
         kv.addLayout(kb)
@@ -264,33 +271,145 @@ class MainWindow(QMainWindow):
         self.resizeDocks([self.d_prev, self.d_cut, self.d_ctx], [400, 170, 220], Qt.Vertical)
         self.resizeDocks([self.d_tasks], [110], Qt.Vertical)
 
+    def _act(self, text, fn, key=None, tip=None, icon=None, checkable=False):
+        a = QAction(text, self)
+        if key:
+            a.setShortcut(QKeySequence(key))
+            a.setShortcutContext(Qt.ApplicationShortcut)
+        if tip:
+            a.setToolTip(tip); a.setStatusTip(tip)
+        if icon is not None:
+            a.setIcon(self.style_icon(icon))
+        a.setCheckable(checkable)
+        a.setMenuRole(QAction.NoRole)   # Mac 上不要被挪进「应用程序」菜单，留在看得见的地方
+        a.triggered.connect(fn)
+        return a
+
+    def style_icon(self, sp):
+        from PySide6.QtWidgets import QStyle
+        return QApplication.style().standardIcon(getattr(QStyle.StandardPixmap, sp))
+
+    def _cur_do(self, fn):
+        if self.cur:
+            fn(self.cur)
+        else:
+            self.statusBar().showMessage("先在结果里选一条（预览一下）", 2500)
+
     def _build_menu(self):
+        """所有功能都列在顶部菜单 + 工具栏（参照 PR）。"""
         m = self.menuBar()
+        A = self.acts = {}
+        # 文件
         fm = m.addMenu("文件")
-        a = QAction("选择媒体库文件夹…", self); a.triggered.connect(self.choose_root); fm.addAction(a)
-        a = QAction("重新扫描", self); a.setShortcut("F5"); a.triggered.connect(self.rescan); fm.addAction(a)
-        fm.addSeparator()
-        a = QAction("设置…", self); a.setShortcut(QKeySequence.Preferences); a.triggered.connect(self.open_settings)
-        fm.addAction(a)
+        A["root"] = self._act("选择媒体库文件夹…", self.choose_root, "Ctrl+O", icon="SP_DirOpenIcon")
+        A["rescan"] = self._act("重新扫描媒体库", self.rescan, "F5", icon="SP_BrowserReload")
+        A["open_root"] = self._act("在文件夹中打开媒体库", lambda: self.lib and QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(self.lib.root))))
+        A["open_exp"] = self._act("打开导出文件夹", self._open_export_dir)
+        A["settings"] = self._act("设置…", self.open_settings, "Ctrl+,", "常规 / 对齐 / 字幕样式",
+                                  icon="SP_FileDialogDetailedView")
+        A["quit"] = self._act("退出", self.close, "Ctrl+Q")
+        for k in ("root", "rescan", "open_root", "open_exp", None, "settings", None, "quit"):
+            fm.addSeparator() if k is None else fm.addAction(A[k])
+        # 搜索
+        sm = m.addMenu("搜索")
+        A["find"] = self._act("搜索框", lambda: (self.q.setFocus(), self.q.selectAll()), "Ctrl+F")
+        A["search"] = self._act("执行搜索", self.do_search, icon="SP_FileDialogContentsView")
+        sm.addAction(A["find"]); sm.addAction(A["search"]); sm.addSeparator()
+        for c in (self.c_exact, self.c_order, self.c_single, self.c_video):
+            a = QAction(c.text(), self, checkable=True); a.setChecked(c.isChecked())
+            a.toggled.connect(c.setChecked); c.toggled.connect(a.setChecked)
+            sm.addAction(a)
+        sm.addSeparator()
+        for i, t in enumerate(("全部", TIER_ORIG, TIER_NEAR, TIER_FUNC)):
+            sm.addAction(self._act(f"只看：{t}", lambda _=False, i=i: self.tabs.setCurrentIndex(i), f"Ctrl+{i + 1}"))
+        # 片段
+        cm = m.addMenu("片段")
+        A["play"] = self._act("播放本句", self.play_clip, "Ctrl+Return", icon="SP_MediaPlay")
+        A["prev"] = self._act("上一条", lambda: self.step(-1), "Ctrl+Up", icon="SP_MediaSkipBackward")
+        A["next"] = self._act("下一条", lambda: self.step(1), "Ctrl+Down", icon="SP_MediaSkipForward")
+        A["loop"] = self._act("连播", lambda on: self.c_loop.setChecked(on), checkable=True)
+        self.c_loop.toggled.connect(A["loop"].setChecked)
+        A["save_cut"] = self._act("保存微调", self.save_cut, "Ctrl+S", icon="SP_DialogSaveButton")
+        A["reset_cut"] = self._act("恢复自动切点", self.reset_cut)
+        A["ctx"] = self._act("看上下文", lambda: self._cur_do(lambda h: (self.show_context(h), self.d_ctx.raise_())))
+        A["collect"] = self._act("采集到当前包", lambda: self._cur_do(self.collect), "Ctrl+D", icon="SP_DialogApplyButton")
+        A["export_one"] = self._act("导出这一条…", lambda: self._cur_do(self.export_one), "Ctrl+E",
+                                    icon="SP_ArrowDown")
+        for k in ("play", "prev", "next", "loop", None, "save_cut", "reset_cut", "ctx", None, "collect", "export_one"):
+            cm.addSeparator() if k is None else cm.addAction(A[k])
+        spm = cm.addMenu("倍速")
+        g = QActionGroup(self)
+        for i in range(self.speed.count()):
+            a = QAction(self.speed.itemText(i), self, checkable=True); g.addAction(a); spm.addAction(a)
+            a.setChecked(i == self.speed.currentIndex())
+            a.triggered.connect(lambda _=False, i=i: self.speed.setCurrentIndex(i))
+        # 采集包
+        pm = m.addMenu("采集包")
+        A["new_pack"] = self._act("新建采集包…", self.new_pack, "Ctrl+N", icon="SP_FileDialogNewFolder")
+        A["pack_up"] = self._act("选中条目上移", lambda: self._pack_move(-1))
+        A["pack_down"] = self._act("选中条目下移", lambda: self._pack_move(1))
+        A["pack_rm"] = self._act("移除选中条目", self._pack_remove)
+        A["export_pack"] = self._act("导出此包…", self.export_pack, "Ctrl+Shift+E", icon="SP_DialogSaveButton")
+        for k in ("new_pack", None, "pack_up", "pack_down", "pack_rm", None, "export_pack"):
+            pm.addSeparator() if k is None else pm.addAction(A[k])
+        # 对齐
         am = m.addMenu("对齐")
-        a = QAction("对齐中心…", self); a.setShortcut("Ctrl+L"); a.triggered.connect(self.open_align_center)
-        am.addAction(a)
-        vm = m.addMenu("视图")
+        A["align_center"] = self._act("对齐中心…", self.open_align_center, "Ctrl+L", "选集对齐、看进度和失败原因",
+                                      icon="SP_ComputerIcon")
+        A["align_cur"] = self._act("对齐当前这一集", lambda: self._cur_do(lambda h: self.queue_keys([h.media_key], True)))
+        A["align_show"] = self._act("对齐选中的作品", self._align_selected_shows)
+        A["align_all"] = self._act("对齐全部未对齐的集…", self._align_all)
+        A["align_pause"] = self._act("暂停 / 继续", self._toggle_align)
+        A["align_cancel"] = self._act("取消排队", self.cancel_queue)
+        A["align_log"] = self._act("打开对齐日志", self._open_align_log)
+        A["auto"] = self._act("入库后自动对齐", self._set_auto, checkable=True)
+        for k in ("align_center", None, "align_cur", "align_show", "align_all", None, "align_pause", "align_cancel",
+                  "align_log", None, "auto"):
+            am.addSeparator() if k is None else am.addAction(A[k])
+        # 窗口
+        vm = m.addMenu("窗口")
         for d in (self.d_lib, self.d_align, self.d_prev, self.d_cut, self.d_ctx, self.d_pack, self.d_tasks):
             vm.addAction(d.toggleViewAction())
         vm.addSeparator()
-        a = QAction("恢复默认布局", self); a.triggered.connect(self._default_layout); vm.addAction(a)
+        A["toolbar"] = self.toolbar_toggle = vm.addAction("工具栏")
+        A["layout"] = self._act("恢复默认布局", self._default_layout, icon="SP_TitleBarNormalButton")
+        vm.addAction(A["layout"])
+        # 帮助
         hm = m.addMenu("帮助")
-        a = QAction("检查更新…", self); a.triggered.connect(lambda: self.check_update(manual=True)); hm.addAction(a)
-        a = QAction(f"关于（版本 {VERSION}）", self)
-        a.triggered.connect(lambda: QMessageBox.about(self, APP, f"{APP} {VERSION}\nhttps://github.com/wimmekhi/clipper"))
-        hm.addAction(a)
-        QTimer.singleShot(5000, lambda: self.check_update(manual=False))
-        QShortcut(QKeySequence("Ctrl+F"), self, activated=lambda: (self.q.setFocus(), self.q.selectAll()))
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.play_clip)
-        QShortcut(QKeySequence("Ctrl+Down"), self, activated=lambda: self.step(1))
-        QShortcut(QKeySequence("Ctrl+Up"), self, activated=lambda: self.step(-1))
-        QShortcut(QKeySequence("Ctrl+D"), self, activated=lambda: self.cur and self.collect(self.cur))
+        hm.addAction(self._act("使用说明（网页）", lambda: QDesktopServices.openUrl(
+            QUrl("https://github.com/wimmekhi/clipper/blob/main/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.md"))))
+        hm.addAction(self._act("检查更新…", lambda: self.check_update(manual=True)))
+        hm.addAction(self._act(f"关于（版本 {VERSION}）", lambda: QMessageBox.about(
+            self, APP, f"{APP} {VERSION}\nhttps://github.com/wimmekhi/clipper")))
+
+        # 工具栏：常用功能一排排开
+        tb = QToolBar("工具栏", self); tb.setObjectName("toolbar_main")
+        tb.setToolButtonStyle(Qt.ToolButtonTextUnderIcon); tb.setIconSize(QSize(20, 20))
+        tb.setMovable(False)
+        for k in ("root", "rescan", None, "search", "play", "prev", "next", None, "save_cut", "collect",
+                  "export_one", None, "new_pack", "export_pack", None, "align_center", None, "settings", "layout"):
+            tb.addSeparator() if k is None else tb.addAction(A[k])
+        self.addToolBar(Qt.TopToolBarArea, tb)
+        self.toolbar = tb
+        self.toolbar_toggle.setCheckable(True); self.toolbar_toggle.setChecked(True)
+        self.toolbar_toggle.toggled.connect(tb.setVisible)
+        if self._autostart:
+            QTimer.singleShot(5000, lambda: self.check_update(manual=False))
+
+    def _open_export_dir(self):
+        if not self.lib:
+            return
+        d = Path(self._export_dir()); d.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
+
+    def _open_align_log(self):
+        if not self.lib:
+            return
+        f = self.lib.data / "align.log"
+        if not f.exists():
+            f.write_text("", "utf-8")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(f)))
 
     # ------------------------------------------------------------ 媒体库
     def _first_run(self):
@@ -317,6 +436,13 @@ class MainWindow(QMainWindow):
         self.qs.setValue("root", root)
         self.root_lb.setText(root)
         self.setWindowTitle(f"{APP} {VERSION} — {Path(root).name}")
+        if self.qs.value("manual_align_105", "") != root:
+            # 1.0.5 起默认手动选集对齐：老库第一次打开时关掉自动对齐
+            self.lib.set_setting("auto_align", False)
+            self.qs.setValue("manual_align_105", root)
+        self.acts["auto"].blockSignals(True)
+        self.acts["auto"].setChecked(self.lib_settings()["auto_align"])
+        self.acts["auto"].blockSignals(False)
         self.refresh_tree(); self.refresh_packs()
         self.rescan()
         self.rescan_timer.start()
@@ -366,13 +492,13 @@ class MainWindow(QMainWindow):
     def lib_settings(self):
         g = self.lib.get_setting
         return dict(align_model=g("align_model", "small"), align_engine=g("align_engine", ""),
-                    hf_mirror=g("hf_mirror", True), auto_align=g("auto_align", True))
+                    hf_mirror=g("hf_mirror", True), auto_align=bool(g("auto_align", False)))
 
     def start_align(self, force=False):
         if not self.lib:
             return
         if not force and not self.lib_settings()["auto_align"]:
-            self.al_lb.setText("自动对齐已关闭（可在「对齐中心」手动开始）")
+            self.al_lb.setText("手动对齐：右键媒体库里的作品，或打开对齐中心选集")
             return
         if self.align_worker and self.align_worker.isRunning():
             self.align_worker.settings = self.lib_settings()
@@ -386,6 +512,81 @@ class MainWindow(QMainWindow):
         self.align_worker.start()
         if self.align_center:
             self.align_center.attach(self.align_worker)
+
+    def queue_keys(self, keys, redo=False):
+        """手动对齐：把这些集排进队列并开跑。redo=True 连已完成的也重跑。"""
+        if not self.lib or not keys:
+            return 0
+        db = self.lib.db
+        cond = "align_status!='running'" if redo else "align_status IN ('none','error')"
+        n = 0
+        for k in keys:
+            n += db.execute(f"UPDATE media SET align_status='queued', align_msg=NULL WHERE key=? AND {cond} "
+                            "AND rel_video IS NOT NULL AND rel_sub IS NOT NULL", (k,)).rowcount
+        db.commit()
+        self.statusBar().showMessage(f"已排队 {n} 集" if n else "选中的都已对齐过（要重跑用对齐中心的「重新对齐」）", 4000)
+        if n:
+            w = self.align_worker
+            if w and w.isRunning() and w.paused:
+                w.pause(False); self.al_btn.setText("暂停")
+            self.start_align(force=True)
+            if self.align_center:
+                self.align_center.reload()
+        return n
+
+    def show_keys(self, shows):
+        q = ",".join("?" * len(shows))
+        return [r[0] for r in self.lib.db.execute(f"SELECT key FROM media WHERE show IN ({q})", list(shows))]
+
+    def _align_selected_shows(self):
+        shows = [it.data(0, Qt.UserRole) for it in self.tree.selectedItems()]
+        if not shows:
+            QMessageBox.information(self, APP, "先在左边媒体库里选中作品（可多选），或打开对齐中心按集选。")
+            return
+        self.queue_keys(self.show_keys(shows))
+
+    def _align_all(self):
+        if not self.lib:
+            return
+        n = self.lib.db.execute("SELECT COUNT(*) FROM media WHERE align_status IN ('none','error') "
+                                "AND rel_video IS NOT NULL AND rel_sub IS NOT NULL").fetchone()[0]
+        if QMessageBox.question(self, APP, f"把 {n} 集未对齐的全部排队？整库会跑很久。") == QMessageBox.Yes:
+            keys = [r[0] for r in self.lib.db.execute("SELECT key FROM media")]
+            self.queue_keys(keys)
+
+    def cancel_queue(self):
+        if not self.lib:
+            return
+        n = self.lib.db.execute("UPDATE media SET align_status='none' WHERE align_status='queued'").rowcount
+        self.lib.db.commit()
+        self.statusBar().showMessage(f"已取消 {n} 集排队（正在跑的这集会跑完）", 4000)
+        if self.align_center:
+            self.align_center.reload()
+
+    def _set_auto(self, on):
+        if not self.lib:
+            return
+        self.lib.set_setting("auto_align", bool(on))
+        if self.align_worker:
+            self.align_worker.settings = self.lib_settings(); self.align_worker.kick()
+        if on:
+            self.start_align()
+
+    def _tree_menu(self, pos):
+        from PySide6.QtWidgets import QMenu
+        it = self.tree.itemAt(pos)
+        if it and not it.isSelected():
+            self.tree.clearSelection(); it.setSelected(True)
+        shows = [i.data(0, Qt.UserRole) for i in self.tree.selectedItems()]
+        mnu = QMenu(self)
+        if shows:
+            label = shows[0] if len(shows) == 1 else f"{len(shows)} 部作品"
+            mnu.addAction(f"对齐「{label}」未对齐的集", self._align_selected_shows)
+            mnu.addAction(f"重新对齐「{label}」全部集", lambda: self.queue_keys(self.show_keys(shows), redo=True))
+            mnu.addAction("只搜这部作品", lambda: self._tree_pick(it or self.tree.selectedItems()[0], 0))
+            mnu.addSeparator()
+        mnu.addAction("对齐中心…", self.open_align_center)
+        mnu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def open_align_center(self):
         if not self.lib:
@@ -761,6 +962,11 @@ class MainWindow(QMainWindow):
                 self.lib.set_setting(k, v)
             from dataclasses import asdict
             self.lib.set_setting("style", asdict(dlg.style()))
+            self.acts["auto"].blockSignals(True)
+            self.acts["auto"].setChecked(self.lib_settings()["auto_align"])
+            self.acts["auto"].blockSignals(False)
+            if self.align_worker:
+                self.align_worker.settings = self.lib_settings()
             self.start_align()
             if self.cur:
                 self.refresh_current()

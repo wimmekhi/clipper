@@ -4,9 +4,9 @@ from __future__ import annotations
 import html
 import re
 
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QRect, QPoint, QSize
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath, QBrush
-from PySide6.QtWidgets import (QWidget, QLabel, QHBoxLayout, QVBoxLayout, QPushButton, QFrame,
+from PySide6.QtWidgets import (QLayout, QWidget, QLabel, QHBoxLayout, QVBoxLayout, QPushButton, QFrame,
                                QSizePolicy)
 
 ACCENT = "#2563EB"
@@ -240,3 +240,73 @@ class WaveformBar(QWidget):
         if self._drag is not None:
             self._drag = None
             self.changed.emit(*self.cut)
+
+
+class FlowLayout(QLayout):
+    """放不下就自动换行的横排布局：窄窗口时按钮折到下一行，不再把面板撑死、拖不动。"""
+
+    def __init__(self, parent=None, spacing=6, margins=(0, 0, 0, 0)):
+        super().__init__(parent)
+        self._items = []
+        self._sp = spacing
+        self.setContentsMargins(*margins)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def addStretch(self, *_):
+        pass
+
+    def addSpacing(self, *_):
+        pass
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        return self._do(QRect(0, 0, w, 0), True)
+
+    def setGeometry(self, r):
+        super().setGeometry(r)
+        self._do(r, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        s = QSize()
+        for it in self._items:
+            s = s.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        return s + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _do(self, rect, test):
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, line_h = r.x(), r.y(), 0
+        for it in self._items:
+            if it.widget() is not None and it.widget().isHidden():
+                continue
+            hint = it.sizeHint()
+            nx = x + hint.width() + self._sp
+            if nx - self._sp > r.right() + 1 and line_h > 0:
+                x = r.x(); y += line_h + self._sp
+                nx = x + hint.width() + self._sp
+                line_h = 0
+            if not test:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x = nx
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y() + m.bottom()

@@ -107,6 +107,50 @@ def _faster_smoke(chk, smoke_wav=None):
     chk("faster 对齐冒烟(tiny)", run)
 
 
+def _ui_test():
+    """真把主窗口开起来：建临时媒体库（1 集）→ 扫描 → 手动排队/取消 → 对齐中心 → 菜单齐全 → 窄窗口下面板还能缩。"""
+    import tempfile, subprocess
+    from PySide6.QtWidgets import QApplication, QDockWidget, QToolBar
+    from clipper import tools
+    from clipper.ui.main import MainWindow
+    app = QApplication.instance() or QApplication([])
+    root = tempfile.mkdtemp(prefix="clipper-ui-")
+    d = os.path.join(root, "Test Show", "S01"); os.makedirs(d)
+    subprocess.run([tools.ffmpeg(), "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=3", "-f", "lavfi",
+                    "-i", "anullsrc=r=48000:cl=mono", "-t", "3", "-shortest", "-c:v", "libx264", "-c:a", "aac",
+                    os.path.join(d, "S01E01.mp4")], check=True)
+    with open(os.path.join(d, "S01E01.srt"), "w", encoding="utf-8") as fh:
+        fh.write("1\n00:00:00,500 --> 00:00:02,000\nWhose turn is it?\n轮到谁了？\n")
+    w = MainWindow(autostart=False)
+    w.resize(1000, 650); w.show(); app.processEvents()
+    w.open_library(root)
+    w._scan.wait(60000); app.processEvents()
+    keys = [r[0] for r in w.lib.db.execute("SELECT key FROM media")]
+    assert keys, "临时库没扫出集"
+    assert not w.lib_settings()["auto_align"], "默认应是手动对齐"
+    started = []
+    w.start_align = lambda force=False: started.append(force)
+    n = w.queue_keys(keys)
+    st = w.lib.db.execute("SELECT align_status FROM media").fetchone()[0]
+    assert n == 1 and st == "queued" and started == [True], f"手动排队失败 n={n} st={st} started={started}"
+    w.cancel_queue()
+    assert w.lib.db.execute("SELECT align_status FROM media").fetchone()[0] == "none", "取消排队失败"
+    w.open_align_center(); app.processEvents(); w.align_center.close()
+    menus = [a.text() for a in w.menuBar().actions()]
+    need = ["文件", "搜索", "片段", "采集包", "对齐", "窗口", "帮助"]
+    assert all(m in menus for m in need), f"菜单缺：{menus}"
+    tb = w.findChild(QToolBar, "toolbar_main")
+    assert tb and len(tb.actions()) >= 15, "工具栏缺"
+    docks = [x for x in w.findChildren(QDockWidget) if x.isVisible()]
+    mins = {x.windowTitle(): x.minimumSizeHint().width() for x in docks}
+    cen = w.centralWidget().minimumSizeHint().width()
+    mw = w.minimumSizeHint().width()
+    assert mw <= 900, f"主窗口最小宽度 {mw}px 太大（中间 {cen}，面板 {mins}），面板会拖不动"
+    w.lib.db.close() if False else None
+    w.close(); app.processEvents()
+    return f"菜单 {len(menus)} 个、工具栏 {len(tb.actions())} 项；全开时窗口最小宽 {mw}px（中间 {cen}，面板 {mins}）"
+
+
 def selftest(out, smoke_wav=None):
     lines, ok = [], True
     def chk(name, fn):
@@ -146,6 +190,7 @@ def selftest(out, smoke_wav=None):
         import clipper.ui.aligncenter  # noqa
         return "ok"
     chk("qt+multimedia+ui", qt)
+    chk("界面：菜单/工具栏/手动对齐/面板缩放", _ui_test)
     def mp_lock():
         lk = multiprocessing.RLock()   # 会拉起 resource_tracker 子进程；没处理好就会重开整个程序
         with lk:

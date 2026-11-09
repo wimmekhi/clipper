@@ -6,6 +6,7 @@ import time
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QColor
+from .widgets import FlowLayout
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox, QCheckBox,
                                QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar, QPlainTextEdit,
                                QAbstractItemView, QSplitter, QWidget, QMessageBox)
@@ -13,7 +14,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushB
 from .. import align
 
 MODELS = ["small", "base", "tiny", "medium", "large-v3-turbo"]
-STATUS_TEXT = {"none": "未对齐", "queued": "优先排队", "running": "对齐中", "done": "完成", "error": "失败"}
+STATUS_TEXT = {"none": "未对齐", "queued": "排队中", "running": "对齐中", "done": "完成", "error": "失败"}
 STATUS_COLOR = {"done": "#059669", "error": "#DC2626", "running": "#2563EB", "queued": "#7C3AED"}
 
 
@@ -77,20 +78,23 @@ class AlignCenter(QDialog):
         v.addWidget(box)
 
         # 按钮
-        bh = QHBoxLayout()
-        self.b_start = QPushButton("▶ 开始对齐"); self.b_start.setObjectName("primary")
+        self.b_start = QPushButton("▶ 对齐选中的集"); self.b_start.setObjectName("primary")
+        self.b_start.setToolTip("在下面列表里选（可 Shift / Ctrl 多选），只跑选中的")
+        self.b_listed = QPushButton("对齐列表里全部未对齐的")
+        self.b_listed.setToolTip("先用上面的「作品」「状态」筛选，再点这个")
         self.b_pause = QPushButton("暂停")
-        self.b_first = QPushButton("先跑选中的")
         self.b_redo = QPushButton("重新对齐选中的")
         self.b_retry = QPushButton("重试全部失败")
+        self.b_cancel = QPushButton("取消排队")
         self.b_log = QPushButton("打开日志文件")
-        for b in (self.b_start, self.b_pause, self.b_first, self.b_redo, self.b_retry):
+        bh = FlowLayout()
+        for b in (self.b_start, self.b_listed, self.b_redo, self.b_retry, self.b_pause, self.b_cancel, self.b_log):
             bh.addWidget(b)
-        bh.addStretch(1); bh.addWidget(self.b_log)
         v.addLayout(bh)
-        self.b_start.clicked.connect(self.start)
+        self.b_start.clicked.connect(lambda: self.queue_selected(redo=False))
+        self.b_listed.clicked.connect(self.queue_listed)
         self.b_pause.clicked.connect(self.toggle_pause)
-        self.b_first.clicked.connect(lambda: self.queue_selected(redo=False))
+        self.b_cancel.clicked.connect(lambda: (self.main.cancel_queue(), self.append("已取消排队")))
         self.b_redo.clicked.connect(lambda: self.queue_selected(redo=True))
         self.b_retry.clicked.connect(self.retry_failed)
         self.b_log.clicked.connect(self.open_log)
@@ -238,23 +242,23 @@ class AlignCenter(QDialog):
     def queue_selected(self, redo: bool):
         keys = self.selected_keys()
         if not keys:
-            QMessageBox.information(self, "对齐中心", "先在列表里选中要跑的集（可以多选）。")
+            QMessageBox.information(self, "对齐中心", "先在列表里选中要跑的集（可以 Shift / Ctrl 多选）。")
             return
-        db = self.main.lib.db
-        if redo:
-            db.executemany("UPDATE media SET align_status='queued', align_msg=NULL WHERE key=? AND align_status!='running'",
-                           [(k,) for k in keys])
-        else:
-            db.executemany("UPDATE media SET align_status='queued' WHERE key=? AND align_status IN ('none','error')",
-                           [(k,) for k in keys])
-        db.commit()
-        self.append(("重新对齐 " if redo else "优先排队 ") + f"{len(keys)} 集")
+        n = self.main.queue_keys(keys, redo=redo)
+        self.append(("重新对齐 " if redo else "排队 ") + f"{n} 集")
         self.reload()
-        self.start()
+        self.attach(self.main.align_worker)
+
+    def queue_listed(self):
+        keys = [self.table.item(r, 0).data(Qt.UserRole) for r in range(self.table.rowCount())]
+        n = self.main.queue_keys(keys)
+        self.append(f"排队 {n} 集（列表里未对齐的）")
+        self.reload()
+        self.attach(self.main.align_worker)
 
     def retry_failed(self):
         db = self.main.lib.db
-        n = db.execute("UPDATE media SET align_status='none', align_msg=NULL WHERE align_status='error'").rowcount
+        n = db.execute("UPDATE media SET align_status='queued', align_msg=NULL WHERE align_status='error'").rowcount
         db.commit()
         self.append(f"重试 {n} 集失败的")
         self.reload()

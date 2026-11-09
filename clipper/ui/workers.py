@@ -88,8 +88,10 @@ class AlignWorker(QThread):
                 self._kick.wait(2)
                 self._kick.clear()
                 continue
+            # 手动模式（默认）只跑排了队的集；自动模式才把所有未对齐的都跑掉
+            sts = "('none','queued')" if self.settings.get("auto_align") else "('queued')"
             row = lib.db.execute(
-                "SELECT * FROM media WHERE align_status IN ('none','queued') AND rel_video IS NOT NULL "
+                f"SELECT * FROM media WHERE align_status IN {sts} AND rel_video IS NOT NULL "
                 "AND rel_sub IS NOT NULL ORDER BY (align_status='queued') DESC, show, season, episode LIMIT 1"
             ).fetchone()
             if not row:
@@ -99,7 +101,7 @@ class AlignWorker(QThread):
                 self._kick.clear()
                 continue
             done = lib.db.execute("SELECT COUNT(*) FROM media WHERE align_status='done'").fetchone()[0]
-            todo = lib.db.execute("SELECT COUNT(*) FROM media WHERE align_status IN ('none','queued') "
+            todo = lib.db.execute(f"SELECT COUNT(*) FROM media WHERE align_status IN {sts} "
                                   "AND rel_video IS NOT NULL AND rel_sub IS NOT NULL").fetchone()[0]
             key = self.current = row["key"]
             lib.db.execute("UPDATE media SET align_status='running', align_msg=NULL WHERE id=?", (row["id"],))
