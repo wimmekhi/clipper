@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSettings, QTimer, QUrl, QSize
-from PySide6.QtGui import QAction, QKeySequence, QShortcut, QFont
+from PySide6.QtGui import QAction, QKeySequence, QShortcut, QFont, QDesktopServices
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
@@ -22,7 +22,7 @@ from ..library import Library
 from ..search import Searcher, TIER_ORIG, TIER_NEAR, TIER_FUNC
 from ..export import Style
 from .widgets import ResultCard, WaveformBar, fmt_ms, highlight_html, TIMING_TEXT
-from .workers import ScanWorker, AlignWorker, ExportWorker, WaveWorker
+from .workers import ScanWorker, AlignWorker, ExportWorker, WaveWorker, UpdateCheck, UpdateDownload
 from .dialogs import SettingsDialog, ExportDialog
 
 APP = "台词切片编辑器"
@@ -280,6 +280,12 @@ class MainWindow(QMainWindow):
             vm.addAction(d.toggleViewAction())
         vm.addSeparator()
         a = QAction("恢复默认布局", self); a.triggered.connect(self._default_layout); vm.addAction(a)
+        hm = m.addMenu("帮助")
+        a = QAction("检查更新…", self); a.triggered.connect(lambda: self.check_update(manual=True)); hm.addAction(a)
+        a = QAction(f"关于（版本 {VERSION}）", self)
+        a.triggered.connect(lambda: QMessageBox.about(self, APP, f"{APP} {VERSION}\nhttps://github.com/wimmekhi/clipper"))
+        hm.addAction(a)
+        QTimer.singleShot(5000, lambda: self.check_update(manual=False))
         QShortcut(QKeySequence("Ctrl+F"), self, activated=lambda: (self.q.setFocus(), self.q.selectAll()))
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.play_clip)
         QShortcut(QKeySequence("Ctrl+Down"), self, activated=lambda: self.step(1))
@@ -758,6 +764,82 @@ class MainWindow(QMainWindow):
             self.start_align()
             if self.cur:
                 self.refresh_current()
+
+    # ------------------------------------------------------------ 更新
+    def check_update(self, manual: bool):
+        if getattr(self, "_upd_check", None) and self._upd_check.isRunning():
+            return
+        self._upd_check = UpdateCheck()
+        self._upd_check.done.connect(lambda r: self._update_checked(r, manual))
+        self._upd_check.start()
+
+    def _update_checked(self, r: dict, manual: bool):
+        from .. import updater
+        if r.get("error"):
+            if manual:
+                QMessageBox.warning(self, "检查更新", "连不上 GitHub：" + r["error"][:200])
+            return
+        ver = r.get("version", "")
+        if not updater.is_newer(ver):
+            if manual:
+                QMessageBox.information(self, "检查更新", f"已经是最新版（{VERSION}）。")
+            return
+        if not manual and self.qs.value("skip_version", "") == ver:
+            return
+        if not r.get("url"):
+            if manual:
+                QMessageBox.information(self, "检查更新", f"有新版 {ver}，但还没有本平台的安装包。")
+            return
+        notes = (r.get("notes") or "").strip()
+        box = QMessageBox(self)
+        box.setWindowTitle("有新版本")
+        box.setText(f"新版 {ver}（当前 {VERSION}），下载约 {r.get('size', 0)/1e6:.0f} MB。\n"
+                    "更新时会先关闭软件，替换后自动重新打开。对齐结果、采集包都在媒体库里，不受影响。")
+        if notes:
+            box.setDetailedText(notes)
+        b_now = box.addButton("一键更新", QMessageBox.AcceptRole)
+        b_skip = box.addButton("跳过这个版本", QMessageBox.RejectRole)
+        box.addButton("以后再说", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is b_skip:
+            self.qs.setValue("skip_version", ver)
+        elif box.clickedButton() is b_now:
+            if updater.current_target() is None:
+                QDesktopServices.openUrl(QUrl(r["page"]))
+                return
+            self._download_update(r)
+
+    def _download_update(self, r):
+        from PySide6.QtWidgets import QProgressDialog
+        dlg = QProgressDialog(f"正在下载 {r['version']}…", "取消", 0, 1000, self)
+        dlg.setWindowTitle("一键更新"); dlg.setWindowModality(Qt.WindowModal); dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False); dlg.setAutoReset(False)
+        w = self._upd_dl = UpdateDownload(r["url"], r.get("size", 0))
+
+        def prog(g, t):
+            dlg.setValue(int(g / t * 1000) if t else 0)
+            dlg.setLabelText(f"正在下载 {r['version']}… {g/1e6:.0f} / {t/1e6:.0f} MB")
+
+        def done(path, err):
+            dlg.close()
+            if err:
+                if err != "已取消":
+                    QMessageBox.warning(self, "一键更新", "下载失败：" + err[:300] + "\n\n可以到 Releases 页面手动下载。")
+                return
+            from .. import updater
+            try:
+                updater.prepare_and_launch(Path(path))
+            except Exception as ex:  # noqa
+                QMessageBox.warning(self, "一键更新", f"替换失败：{ex}\n\n新版下载在：{path}")
+                return
+            QMessageBox.information(self, "一键更新", "下载好了，软件会关闭并替换，几秒后自动打开新版。")
+            self._updating = True
+            self.close()
+            QApplication.quit()
+        w.progress.connect(prog)
+        w.done.connect(done)
+        dlg.canceled.connect(lambda: setattr(w, "cancel", True))
+        w.start()
 
     def closeEvent(self, e):
         self.qs.setValue("state", self.saveState())

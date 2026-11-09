@@ -9,7 +9,7 @@ from clipper.paths import VERSION
 NAME = "台词切片编辑器"
 datas = [("assets", "assets")]
 binaries = [(f, "bin") for f in glob.glob("bin/*")]
-hidden = ["clipper.ui.main", "clipper.ui.aligncenter"]
+hidden = ["clipper.ui.main", "clipper.ui.aligncenter", "certifi"]
 for pkg in ("faster_whisper", "ctranslate2", "onnxruntime"):
     d, b, h = collect_all(pkg)
     datas += d; binaries += b; hidden += h

@@ -113,6 +113,17 @@ def selftest(out, smoke_wav=None):
             lines.append(f"FAIL {name}: {ex!r}")
     from clipper import tools, paths
     chk("version", lambda: paths.VERSION)
+
+    def upd():
+        from clipper import updater
+        r = updater.check()
+        if not r["version"]:
+            raise RuntimeError(f"没读到版本：{r}")
+        t = updater.current_target()
+        if paths.frozen() and t is None:
+            raise RuntimeError("打包版却找不到要替换的 exe/.app")
+        return f"线上最新 {r['version']}，本平台包 {'有' if r['url'] else '无'}，替换目标 {t}"
+    chk("一键更新：查版本+证书+替换目标", upd)
     chk("ffmpeg", lambda: tools.ffmpeg())
     chk("ffmpeg+libass", lambda: tools.check() or "libass ok")
     chk("fonts", lambda: sorted(os.listdir(paths.fonts_dir())))

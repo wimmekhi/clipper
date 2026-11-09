@@ -201,3 +201,33 @@ class StillWorker(QThread):
             self.done.emit("")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class UpdateCheck(QThread):
+    done = Signal(dict)      # updater.check() 结果，或 {"error": ...}
+
+    def run(self):
+        from .. import updater
+        try:
+            self.done.emit(updater.check())
+        except Exception as ex:  # noqa
+            self.done.emit({"error": str(ex)})
+
+
+class UpdateDownload(QThread):
+    progress = Signal(float, float)
+    done = Signal(str, str)  # zip 路径, 错误
+
+    def __init__(self, url, size):
+        super().__init__()
+        self.url, self.size = url, size
+        self.cancel = False
+
+    def run(self):
+        from .. import updater
+        try:
+            p = updater.download(self.url, self.size, lambda g, t: self.progress.emit(g, t),
+                                 lambda: self.cancel)
+            self.done.emit(str(p), "")
+        except Exception as ex:  # noqa
+            self.done.emit("", str(ex))
