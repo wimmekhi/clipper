@@ -9,10 +9,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath, QBrush
 from PySide6.QtWidgets import (QLayout, QWidget, QLabel, QHBoxLayout, QVBoxLayout, QPushButton, QFrame,
                                QSizePolicy)
 
-ACCENT = "#2563EB"
-TIER_COLOR = {"原句型": "#16A34A", "近似变体": "#D97706", "功能等价": "#7C3AED"}
-TIMING_TEXT = {"aligned": ("已对齐", "#16A34A"), "estimated": ("估算", "#D97706"),
-               "subtitle": ("字幕时间", "#6B7280"), "manual": ("已微调", "#2563EB")}
+from .theme import ACCENT, TIER_COLOR, TIMING_TEXT, CORAL, TEXT, TEXT2, ACCENT_D
 
 
 def fmt_ms(t: float) -> str:
@@ -26,16 +23,25 @@ def highlight_html(en: str, matched: str) -> str:
         return text
     words = matched.split()
     pat = r"\b" + r"[\W_]+".join(re.escape(html.escape(w)) for w in words) + r"\b"
-    return re.sub(pat, lambda m: f'<span style="color:#DC2626;font-weight:600">{m.group(0)}</span>', text,
+    return re.sub(pat, lambda m: f'<span style="color:#F43F5E;font-weight:700">{m.group(0)}</span>', text,
                   count=1, flags=re.I)
 
 
 def badge(text, color):
     lb = QLabel(text)
-    lb.setStyleSheet(f"QLabel{{color:{color};border:1px solid {color};border-radius:3px;padding:0 4px;"
-                     f"font-size:11px;}}")
+    c = QColor(color)
+    lb.setStyleSheet(f"QLabel{{color:{color};background:rgba({c.red()},{c.green()},{c.blue()},0.13);border:none;"
+                     f"border-radius:8px;padding:1px 7px;font-size:11px;font-weight:600;}}")
     lb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
     return lb
+
+
+class FitLabel(QLabel):
+    """放不下就整段不画（不显示被截半截的时间码）。"""
+
+    def paintEvent(self, e):
+        if self.fontMetrics().horizontalAdvance(self.text()) <= self.width():
+            super().paintEvent(e)
 
 
 class ResultCard(QFrame):
@@ -48,50 +54,52 @@ class ResultCard(QFrame):
         super().__init__(parent)
         self.hit = hit
         self.setObjectName("card")
-        self.setStyleSheet("#card{background:#fff;border:1px solid #E5E7EB;border-radius:8px;}"
-                           "#card:hover{border-color:#93C5FD;}")
         v = QVBoxLayout(self)
-        v.setContentsMargins(12, 8, 12, 8)
+        v.setContentsMargins(14, 10, 14, 10)
         v.setSpacing(4)
         top = QHBoxLayout()
         top.setSpacing(6)
-        top.addWidget(badge("剧集" if hit.kind == "tv" else "电影", "#6B7280"))
-        top.addWidget(badge(hit.tier, TIER_COLOR.get(hit.tier, "#6B7280")))
+        top.addWidget(badge("剧集" if hit.kind == "tv" else "电影", "#64748B"))
+        top.addWidget(badge(hit.tier, TIER_COLOR.get(hit.tier, "#64748B")))
         tt, tc = TIMING_TEXT.get(timing, ("", "#999"))
         top.addWidget(badge(tt, tc))
         if not hit.has_video:
-            top.addWidget(badge("无视频", "#DC2626"))
+            top.addWidget(badge("无视频", "#E11D48"))
         if hit.speakers > 1:
-            top.addWidget(badge("多人", "#9CA3AF"))
+            top.addWidget(badge("多人", "#94A3B8"))
         name = QLabel(f"<b>{html.escape(hit.label)}</b>")
-        top.addWidget(name)
-        top.addStretch(1)
-        tm = QLabel(f"{fmt_ms(span[0])} - {fmt_ms(span[1])}")
-        tm.setStyleSheet("color:#6B7280;font-family:Menlo,Consolas,monospace;font-size:11px;")
-        top.addWidget(tm)
+        name.setToolTip(hit.label)
+        name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)   # 窄的时候剧名被截，不撑宽卡片
+        top.addWidget(name, 1)
         v.addLayout(top)
         en = QLabel(highlight_html(hit.en, hit.matched))
         en.setWordWrap(True)
-        en.setStyleSheet("font-size:14px;color:#111827;")
+        en.setStyleSheet("font-size:15px;color:#1E293B;")
         v.addWidget(en)
         if hit.zh:
             zh = QLabel(html.escape(hit.zh))
             zh.setWordWrap(True)
-            zh.setStyleSheet("font-size:12px;color:#6B7280;")
+            zh.setStyleSheet("font-size:12px;color:#64748B;")
             v.addWidget(zh)
         btns = QHBoxLayout()
-        btns.setSpacing(6)
+        btns.setSpacing(4)
         for text, sig in (("预览", self.preview), ("采集", self.collect), ("上下文", self.context),
                           ("导出片段", self.export_one)):
             b = QPushButton(text)
             b.setCursor(Qt.PointingHandCursor)
-            b.setStyleSheet("QPushButton{border:1px solid #D1D5DB;border-radius:4px;padding:2px 10px;"
-                            "background:#F9FAFB;}QPushButton:hover{background:#EFF6FF;border-color:#93C5FD;}")
+            b.setObjectName("primary" if text == "预览" else "ghost")
+            if text == "预览":
+                b.setStyleSheet("padding:3px 14px;border-radius:12px;")
             if text == "预览" and not hit.has_video:
                 b.setEnabled(False)
             b.clicked.connect(lambda _=False, s=sig: s.emit(self.hit))
             btns.addWidget(b)
         btns.addStretch(1)
+        tm = FitLabel(f"{fmt_ms(span[0])} - {fmt_ms(span[1])}")
+        tm.setStyleSheet("color:#94A3B8;font-family:Menlo,Consolas,monospace;font-size:11px;")
+        tm.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        tm.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        btns.addWidget(tm, 1)
         v.addLayout(btns)
 
     def mouseDoubleClickEvent(self, e):
@@ -145,21 +153,22 @@ class WaveformBar(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         W, H = self.width(), self.height()
-        p.fillRect(self.rect(), QColor("#F8FAFC"))
+        bg = QPainterPath(); bg.addRoundedRect(QRectF(self.rect()), 10, 10)
+        p.fillPath(bg, QColor(255, 255, 255, 170))
         wave_top, wave_h = 18, H - 50
         mid = wave_top + wave_h / 2
         if self.sub:
             x0, x1 = self.x_of(self.sub[0]), self.x_of(self.sub[1])
-            p.fillRect(QRectF(x0, 2, x1 - x0, 12), QColor("#E5E7EB"))
+            p.fillRect(QRectF(x0, 2, x1 - x0, 12), QColor(148, 163, 184, 60))
             p.setPen(QColor("#6B7280"))
             f = QFont(); f.setPointSize(8); p.setFont(f)
             p.drawText(QRectF(x0 + 3, 1, max(40, x1 - x0), 14), Qt.AlignVCenter | Qt.AlignLeft, "原字幕")
         if self.cut:
             x0, x1 = self.x_of(self.cut[0]), self.x_of(self.cut[1])
-            p.fillRect(QRectF(x0, wave_top, x1 - x0, wave_h), QColor(37, 99, 235, 40))
+            p.fillRect(QRectF(x0, wave_top, x1 - x0, wave_h), QColor(45, 212, 191, 55))
         if self.peaks is not None and len(self.peaks):
             n = len(self.peaks)
-            pen = QPen(QColor("#64748B")); pen.setWidthF(1)
+            pen = QPen(QColor("#5EB8C9")); pen.setWidthF(1)
             p.setPen(pen)
             for i in range(n):
                 x = i / n * W
@@ -188,13 +197,13 @@ class WaveformBar(QWidget):
         if self.cut:
             for t in self.cut:
                 x = self.x_of(t)
-                p.setPen(QPen(QColor("#2563EB"), 2))
+                p.setPen(QPen(QColor("#0D9488"), 2))
                 p.drawLine(QPointF(x, wave_top - 2), QPointF(x, wave_top + wave_h + 2))
-                p.setBrush(QBrush(QColor("#2563EB")))
-                p.drawRect(QRectF(x - self.HANDLE / 2, wave_top - 4, self.HANDLE, 10))
+                p.setBrush(QBrush(QColor("#0D9488")))
+                p.drawRoundedRect(QRectF(x - self.HANDLE / 2, wave_top - 5, self.HANDLE, 12), 3, 3)
         if self.playhead is not None and self.t0 <= self.playhead <= self.t1:
             x = self.x_of(self.playhead)
-            p.setPen(QPen(QColor("#DC2626"), 1))
+            p.setPen(QPen(QColor("#F43F5E"), 1.5))
             p.drawLine(QPointF(x, 0), QPointF(x, H))
         p.end()
 

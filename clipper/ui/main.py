@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QWidget, 
                                QLineEdit, QPushButton, QCheckBox, QComboBox, QLabel, QListWidget,
                                QListWidgetItem, QTabBar, QFileDialog, QMessageBox, QProgressBar, QSpinBox,
                                QInputDialog, QTreeWidget, QTreeWidgetItem, QSizePolicy, QFrame, QDoubleSpinBox,
-                               QAbstractItemView, QToolBar, QStackedLayout)
+                               QAbstractItemView, QToolBar, QStackedLayout, QTabWidget, QToolButton)
 
 from .. import tools
 from ..paths import VERSION, icon_path
@@ -24,32 +24,19 @@ from ..export import Style
 from .widgets import ResultCard, WaveformBar, fmt_ms, highlight_html, TIMING_TEXT, FlowLayout
 from .workers import ScanWorker, AlignWorker, ExportWorker, WaveWorker, UpdateCheck, UpdateDownload
 from .dialogs import SettingsDialog, ExportDialog
+from . import theme
+from .theme import icon, GlassTitle, glass_body
 
 APP = "台词切片编辑器"
 PAGE = 60
 
-QSS = """
-QMainWindow, QWidget { font-size: 13px; color: #111827; }
-QCheckBox, QLabel, QRadioButton { color: #111827; }
-QTreeWidget, QListWidget, QComboBox, QSpinBox, QDoubleSpinBox { color: #111827; background: #fff; }
-QHeaderView::section { background: #F9FAFB; color: #374151; border: none; border-bottom: 1px solid #E5E7EB; padding: 4px 6px; }
-QPushButton { color: #111827; }
-QMainWindow { background: #F3F4F6; }
-QDockWidget::title { background: #F9FAFB; padding: 5px 8px; border-bottom: 1px solid #E5E7EB; font-weight: 600; }
-QLineEdit { border: 1px solid #D1D5DB; border-radius: 6px; padding: 6px 8px; background: #fff; }
-QLineEdit:focus { border-color: #2563EB; }
-QPushButton#primary { background: #2563EB; color: #fff; border: none; border-radius: 6px; padding: 6px 16px; }
-QPushButton#primary:hover { background: #1D4ED8; }
-QListWidget { border: none; background: transparent; }
-QTreeWidget { border: none; }
-QTabBar::tab { padding: 5px 12px; border: none; color: #6B7280; }
-QTabBar::tab:selected { color: #2563EB; border-bottom: 2px solid #2563EB; }
-"""
 
 
 class MainWindow(QMainWindow):
     def __init__(self, autostart=True):
         super().__init__()
+        if not QApplication.instance().styleSheet():
+            theme.apply_theme(QApplication.instance())
         self.setWindowTitle(f"{APP} {VERSION}")
         self.resize(1440, 900)
         self._autostart = autostart
@@ -68,11 +55,12 @@ class MainWindow(QMainWindow):
         self._wave_workers = []
         self.setDockNestingEnabled(True)
         self.setDockOptions(QMainWindow.AllowNestedDocks | QMainWindow.AllowTabbedDocks | QMainWindow.AnimatedDocks)
+        self.setTabPosition(Qt.AllDockWidgetAreas, QTabWidget.North)   # 叠在一起的面板，标签放上面
+        self.setContentsMargins(8, 0, 8, 6)
         self._build_search()
         self._build_docks()
         self._build_menu()
-        self.setStyleSheet(QSS)
-        st = self.qs.value("state")
+        st = self.qs.value("state106")   # 1.0.6 布局重排：不沿用旧版保存的面板位置
         if st is not None:
             self.restoreState(st)
         geo = self.qs.value("geometry")
@@ -87,31 +75,52 @@ class MainWindow(QMainWindow):
         else:
             QTimer.singleShot(50, self._first_run)
 
+    def paintEvent(self, e):
+        from PySide6.QtGui import QPainter
+        p = QPainter(self)
+        theme.paint_backdrop(p, self.rect())
+        p.end()
+
     # ------------------------------------------------------------ 构建界面
     def _build_search(self):
-        w = QWidget()
+        outer = QWidget()
+        ov = QVBoxLayout(outer)
+        ov.setContentsMargins(0, 0, 0, 0)
+        w = QFrame(); w.setObjectName("glass")
+        ov.addWidget(w)
         v = QVBoxLayout(w)
-        v.setContentsMargins(14, 12, 14, 8)
+        v.setContentsMargins(16, 14, 16, 8)
+        v.setSpacing(8)
         row = QHBoxLayout()
-        self.q = QLineEdit()
+        row.setSpacing(8)
+        self.q = QLineEdit(); self.q.setObjectName("bigsearch")
+        self.q.addAction(icon("search", theme.TEXT3, 16), QLineEdit.LeadingPosition)
         self.q.setPlaceholderText("搜索台词或句型，例如  what are you doing　/　whose * is this　/　is this your ...")
         self.q.returnPressed.connect(self.do_search)
-        f = self.q.font(); f.setPointSize(f.pointSize() + 2); self.q.setFont(f)
         row.addWidget(self.q, 1)
-        b = QPushButton("搜索"); b.setObjectName("primary"); b.clicked.connect(self.do_search)
+        b = QPushButton("搜索"); b.setObjectName("primary"); b.setProperty("class", "big")
+        b.setStyleSheet("border-radius:19px;padding:9px 24px;font-size:14px;")
+        b.clicked.connect(self.do_search)
         row.addWidget(b)
         v.addLayout(row)
-        opts = FlowLayout(spacing=8)
-        self.c_exact = QCheckBox("精确"); self.c_exact.setToolTip("不做词形变化（loved 不算 love）")
-        self.c_order = QCheckBox("严格顺序"); self.c_order.setToolTip("词必须按顺序连在一起；* 或 ... 表示中间可以有几个词")
-        self.c_single = QCheckBox("只看单人"); self.c_single.setChecked(True)
-        self.c_video = QCheckBox("只看有视频")
+        opts = FlowLayout(spacing=6)
+        # 筛选项做成可点的小胶囊（接口和复选框一样：isChecked / toggled）
+
+        def chip(text, on=False):
+            c = QPushButton(text); c.setObjectName("chip"); c.setCheckable(True); c.setChecked(on)
+            c.setCursor(Qt.PointingHandCursor)
+            return c
+        self.c_exact = chip("精确"); self.c_exact.setToolTip("不做词形变化（loved 不算 love）")
+        self.c_order = chip("严格顺序"); self.c_order.setToolTip("词必须按顺序连在一起；* 或 ... 表示中间可以有几个词")
+        self.c_single = chip("只看单人", True)
+        self.c_video = chip("只看有视频")
         for c in (self.c_exact, self.c_order, self.c_single, self.c_video):
             c.toggled.connect(lambda _=False: self.do_search() if self.q.text().strip() else None)
             opts.addWidget(c)
         def pair(text, w):
             box = QWidget(); hl = QHBoxLayout(box); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(4)
-            hl.addWidget(QLabel(text)); hl.addWidget(w)
+            lb = QLabel(text); lb.setObjectName("muted")
+            hl.addWidget(lb); hl.addWidget(w)
             opts.addWidget(box)
         self.f_show = QComboBox(); self.f_show.setMinimumWidth(140)
         self.f_show.currentIndexChanged.connect(lambda _: self.do_search() if self.q.text().strip() else None)
@@ -128,37 +137,50 @@ class MainWindow(QMainWindow):
             self.tabs.addTab(t)
         self.tabs.setDrawBase(False)
         self.tabs.currentChanged.connect(lambda _: self.render_results())
-        th = QHBoxLayout(); th.addWidget(self.tabs); th.addStretch(1)
-        self.count_lb = QLabel(""); self.count_lb.setStyleSheet("color:#6B7280;")
+        self.tabs.setExpanding(False)
+        th = FlowLayout(spacing=8); th.addWidget(self.tabs)
+        self.count_lb = QLabel(""); self.count_lb.setObjectName("muted")
         th.addWidget(self.count_lb)
+        self.count_lb.setContentsMargins(4, 6, 0, 0)
         v.addLayout(th)
-        self.results = QListWidget()
-        self.results.setSpacing(4)
+        self.results = QListWidget(); self.results.setObjectName("results")
+        self.results.setSpacing(5)
         self.results.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.results.verticalScrollBar().valueChanged.connect(self._maybe_more)
+        self.results.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.results.setMinimumWidth(330)   # 卡片里四个按钮的宽度；再窄就该拖面板了
+        self._relayout_timer = QTimer(self, singleShot=True, interval=60, timeout=self._relayout_cards)
+        self.results.viewport().installEventFilter(self)
         v.addWidget(self.results, 1)
-        self.setCentralWidget(w)
+        self.setCentralWidget(outer)
 
     def _dock(self, title, widget, area, name):
         d = QDockWidget(title, self)
         d.setObjectName(name)
-        d.setWidget(widget)
+        d.setTitleBarWidget(GlassTitle(d))
+        d.setWidget(glass_body(widget))
         d.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         self.addDockWidget(area, d)
         return d
 
     def _build_docks(self):
-        # 媒体库
-        lw = QWidget(); lv = QVBoxLayout(lw); lv.setContentsMargins(8, 6, 8, 6)
-        self.root_lb = QLabel("未选择媒体库"); self.root_lb.setWordWrap(True)
-        self.root_lb.setStyleSheet("color:#6B7280;font-size:11px;")
+        # 媒体库（左上）
+        lw = QWidget(); lv = QVBoxLayout(lw); lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(6)
+        self.root_lb = QLabel("未选择媒体库"); self.root_lb.setWordWrap(True); self.root_lb.setObjectName("small")
         lv.addWidget(self.root_lb)
-        hb = FlowLayout()
-        b1 = QPushButton("选择文件夹"); b1.clicked.connect(self.choose_root)
-        b2 = QPushButton("重新扫描"); b2.clicked.connect(self.rescan)
+        hb = FlowLayout(spacing=6)
+        b1 = QPushButton(icon("folder", theme.ACCENT_D, 16), "选择"); b1.clicked.connect(self.choose_root)
+        b1.setToolTip("选择媒体库文件夹")
+        b2 = QPushButton(icon("refresh", theme.ACCENT_D, 16), "扫描"); b2.clicked.connect(self.rescan)
+        b2.setToolTip("重新扫描媒体库")
         hb.addWidget(b1); hb.addWidget(b2); lv.addLayout(hb)
-        self.tree = QTreeWidget(); self.tree.setHeaderLabels(["作品", "集数", "已对齐"])
-        self.tree.setColumnWidth(0, 130); self.tree.setColumnWidth(1, 44)
+        self.tree = QTreeWidget(); self.tree.setHeaderLabels(["作品", "集", "对齐"])
+        self.tree.setColumnWidth(0, 120); self.tree.setColumnWidth(1, 34)
+        self.tree.setRootIsDecorated(False)
+        from PySide6.QtWidgets import QHeaderView
+        self.tree.header().setStretchLastSection(False)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.tree.itemDoubleClicked.connect(self._tree_pick)
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -166,63 +188,71 @@ class MainWindow(QMainWindow):
         self.tree.setToolTip("右键作品：对齐这部作品")
         lv.addWidget(self.tree, 1)
         self.d_lib = self._dock("媒体库", lw, Qt.LeftDockWidgetArea, "dock_lib")
-        # 后台对齐
-        aw = QWidget(); av = QVBoxLayout(aw); av.setContentsMargins(8, 6, 8, 6)
-        self.al_lb = QLabel("手动对齐：右键媒体库里的作品，或打开对齐中心选集"); self.al_lb.setWordWrap(True)
+        # 对齐（左下，紧凑）
+        aw = QWidget(); av = QVBoxLayout(aw); av.setContentsMargins(0, 0, 0, 0); av.setSpacing(6)
+        self.al_lb = QLabel("右键作品或到对齐中心选集")
+        self.al_lb.setWordWrap(True)
+        self.al_lb.setObjectName("muted")
         self.al_bar = QProgressBar(); self.al_bar.setRange(0, 1000); self.al_bar.setTextVisible(False)
         self.al_bar.setFixedHeight(6)
         self.al_btn = QPushButton("暂停"); self.al_btn.clicked.connect(self._toggle_align)
-        self.al_center_btn = QPushButton("对齐中心…"); self.al_center_btn.clicked.connect(self.open_align_center)
-        self.al_log = QListWidget(); self.al_log.setMaximumHeight(120)
-        self.al_log.setStyleSheet("font-size:11px;color:#6B7280;")
+        self.al_center_btn = QPushButton(icon("wave", "#FFFFFF", 16), "对齐中心"); self.al_center_btn.setObjectName("primary")
+        self.al_center_btn.clicked.connect(self.open_align_center)
+        self.al_log = QListWidget(); self.al_log.setMaximumHeight(110)
+        self.al_log.setStyleSheet(f"font-size:11px;color:{theme.TEXT2};")
         av.addWidget(self.al_lb); av.addWidget(self.al_bar)
-        ah = FlowLayout(); ah.addWidget(self.al_center_btn); ah.addWidget(self.al_btn); av.addLayout(ah)
+        ah = FlowLayout(spacing=6); ah.addWidget(self.al_center_btn); ah.addWidget(self.al_btn); av.addLayout(ah)
         av.addWidget(self.al_log)
         self.d_align = self._dock("对齐", aw, Qt.LeftDockWidgetArea, "dock_align")
-        # 预览
-        pw = QWidget(); pv = QVBoxLayout(pw); pv.setContentsMargins(6, 6, 6, 6)
+        # 预览（右上）
+        pw = QWidget(); pv = QVBoxLayout(pw); pv.setContentsMargins(0, 0, 0, 0); pv.setSpacing(6)
+        vf = QFrame(); vf.setObjectName("videoFrame")
+        vfl = QVBoxLayout(vf); vfl.setContentsMargins(6, 6, 6, 6)
         self.video = QVideoWidget(); self.video.setMinimumSize(160, 90)
-        self.video.setStyleSheet("background:#000;")
+        self.video.setStyleSheet("background:#0F172A;")
+        vfl.addWidget(self.video)
         self.player = QMediaPlayer(self); self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio); self.player.setVideoOutput(self.video)
         self.player.positionChanged.connect(self._on_pos)
         self.player.mediaStatusChanged.connect(self._on_status)
-        pv.addWidget(self.video, 1)
+        pv.addWidget(vf, 1)
         self.sub_en = QLabel(""); self.sub_en.setAlignment(Qt.AlignCenter); self.sub_en.setWordWrap(True)
-        self.sub_en.setStyleSheet("font-size:15px;color:#111827;")
+        self.sub_en.setStyleSheet(f"font-size:16px;font-weight:600;color:{theme.TEXT};")
         self.sub_zh = QLabel(""); self.sub_zh.setAlignment(Qt.AlignCenter); self.sub_zh.setWordWrap(True)
-        self.sub_zh.setStyleSheet("font-size:13px;color:#6B7280;")
+        self.sub_zh.setStyleSheet(f"font-size:13px;color:{theme.TEXT2};")
         pv.addWidget(self.sub_en); pv.addWidget(self.sub_zh)
-        ctl = FlowLayout()
-        self.b_play = QPushButton("播放本句"); self.b_play.clicked.connect(self.play_clip)
-        b_prev = QPushButton("上一条"); b_prev.clicked.connect(lambda: self.step(-1))
-        b_next = QPushButton("下一条"); b_next.clicked.connect(lambda: self.step(1))
+        ctl = FlowLayout(spacing=6)
+        b_prev = QPushButton(icon("prev", theme.ACCENT_D, 16), ""); b_prev.clicked.connect(lambda: self.step(-1))
+        b_prev.setToolTip("上一条（Ctrl+↑）")
+        self.b_play = QPushButton(icon("play", "#FFFFFF", 16), "播放本句"); self.b_play.setObjectName("primary")
+        self.b_play.clicked.connect(self.play_clip)
+        b_next = QPushButton(icon("next", theme.ACCENT_D, 16), ""); b_next.clicked.connect(lambda: self.step(1))
+        b_next.setToolTip("下一条（Ctrl+↓）")
         self.speed = QComboBox()
         for s in ("0.5", "0.75", "1.0", "1.25"):
             self.speed.addItem(s + "×", float(s))
         self.speed.setCurrentIndex(2)
         self.speed.currentIndexChanged.connect(lambda _: self.player.setPlaybackRate(self.speed.currentData()))
-        self.c_loop = QCheckBox("连播")
-        for x in (b_prev, self.b_play, b_next):
+        self.speed.setToolTip("倍速")
+        self.c_loop = QPushButton(icon("loop", theme.ACCENT_D, 16), "连播"); self.c_loop.setObjectName("chip")
+        self.c_loop.setCheckable(True)
+        for x in (b_prev, self.b_play, b_next, self.speed, self.c_loop):
             ctl.addWidget(x)
-        sp = QWidget(); sl = QHBoxLayout(sp); sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(4)
-        sl.addWidget(QLabel("倍速")); sl.addWidget(self.speed); sl.addWidget(self.c_loop)
-        ctl.addWidget(sp)
         pv.addLayout(ctl)
         self.d_prev = self._dock("预览", pw, Qt.RightDockWidgetArea, "dock_preview")
         # 切点
-        cw = QWidget(); cv = QVBoxLayout(cw); cv.setContentsMargins(8, 6, 8, 6)
+        cw = QWidget(); cv = QVBoxLayout(cw); cv.setContentsMargins(0, 0, 0, 0); cv.setSpacing(6)
         self.wave = WaveformBar()
         self.wave.changed.connect(self._cut_changed)
         self.wave.seek.connect(lambda t: self.player.setPosition(int(t * 1000)))
         cv.addWidget(self.wave, 1)
-        self.cut_lb = QLabel(""); self.cut_lb.setStyleSheet("font-size:11px;color:#374151;")
+        self.cut_lb = QLabel(""); self.cut_lb.setObjectName("small")
         self.cut_lb.setWordWrap(True)
         cv.addWidget(self.cut_lb)
-        ch = FlowLayout()
-        bt = QPushButton("试听切段"); bt.clicked.connect(self.play_clip)
-        bs = QPushButton("保存微调"); bs.clicked.connect(self.save_cut)
-        br = QPushButton("恢复自动"); br.clicked.connect(self.reset_cut)
+        ch = FlowLayout(spacing=6)
+        bt = QPushButton(icon("play", theme.ACCENT_D, 14), "试听"); bt.clicked.connect(self.play_clip)
+        bs = QPushButton(icon("bookmark", theme.ACCENT_D, 16), "保存微调"); bs.clicked.connect(self.save_cut)
+        br = QPushButton("恢复自动"); br.setObjectName("ghost"); br.clicked.connect(self.reset_cut)
         ch.addWidget(bt); ch.addWidget(bs); ch.addWidget(br)
         self.wave.setToolTip("拖两端调整，吸附词边界；按住 Shift 自由拖")
         cv.addLayout(ch)
@@ -232,46 +262,47 @@ class MainWindow(QMainWindow):
         self.ctx.itemDoubleClicked.connect(self._ctx_pick)
         self.d_ctx = self._dock("上下文", self.ctx, Qt.RightDockWidgetArea, "dock_ctx")
         # 采集包
-        kw = QWidget(); kv = QVBoxLayout(kw); kv.setContentsMargins(8, 6, 8, 6)
-        kh = QHBoxLayout()
+        kw = QWidget(); kv = QVBoxLayout(kw); kv.setContentsMargins(0, 0, 0, 0); kv.setSpacing(6)
+        kh = QHBoxLayout(); kh.setSpacing(6)
         self.pack_cb = QComboBox(); self.pack_cb.currentIndexChanged.connect(lambda _: self.load_pack())
-        bn = QPushButton("新建"); bn.clicked.connect(self.new_pack)
+        bn = QPushButton(icon("newpack", theme.ACCENT_D, 16), "新建"); bn.clicked.connect(self.new_pack)
         kh.addWidget(self.pack_cb, 1); kh.addWidget(bn)
         kv.addLayout(kh)
         self.pack_list = QListWidget(); self.pack_list.setWordWrap(True)
         self.pack_list.itemDoubleClicked.connect(self._pack_pick)
         kv.addWidget(self.pack_list, 1)
-        kb = FlowLayout()
+        kb = FlowLayout(spacing=6)
         for t, fn in (("上移", lambda: self._pack_move(-1)), ("下移", lambda: self._pack_move(1)),
                       ("移除", self._pack_remove)):
-            b = QPushButton(t); b.clicked.connect(fn); kb.addWidget(b)
-        be = QPushButton("导出此包"); be.setObjectName("primary"); be.clicked.connect(self.export_pack)
+            b = QPushButton(t); b.setObjectName("ghost"); b.clicked.connect(fn); kb.addWidget(b)
+        be = QPushButton(icon("package", "#FFFFFF", 16), "导出此包"); be.setObjectName("primary")
+        be.clicked.connect(self.export_pack)
         kb.addWidget(be)
         kv.addLayout(kb)
         self.d_pack = self._dock("采集包", kw, Qt.RightDockWidgetArea, "dock_pack")
-        # 导出任务
+        # 导出任务（和上下文、采集包叠成标签，不再占底部一整条）
         self.tasks = QListWidget(); self.tasks.setWordWrap(True)
         self.tasks.itemDoubleClicked.connect(self._open_task)
-        self.d_tasks = self._dock("导出任务", self.tasks, Qt.BottomDockWidgetArea, "dock_tasks")
+        self.d_tasks = self._dock("导出任务", self.tasks, Qt.RightDockWidgetArea, "dock_tasks")
         self._default_layout()
 
     def _default_layout(self):
+        """左：媒体库 + 对齐；中：搜索与结果；右：预览 → 切点 → 上下文 / 采集包 / 导出任务（标签）。"""
         for d in (self.d_lib, self.d_align):
             self.addDockWidget(Qt.LeftDockWidgetArea, d); d.show(); d.setFloating(False)
         self.splitDockWidget(self.d_lib, self.d_align, Qt.Vertical)
-        for d in (self.d_prev, self.d_cut, self.d_ctx, self.d_pack):
+        for d in (self.d_prev, self.d_cut, self.d_ctx, self.d_pack, self.d_tasks):
             self.addDockWidget(Qt.RightDockWidgetArea, d); d.show(); d.setFloating(False)
         self.splitDockWidget(self.d_prev, self.d_cut, Qt.Vertical)
         self.splitDockWidget(self.d_cut, self.d_ctx, Qt.Vertical)
         self.tabifyDockWidget(self.d_ctx, self.d_pack)
+        self.tabifyDockWidget(self.d_pack, self.d_tasks)
         self.d_ctx.raise_()
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.d_tasks); self.d_tasks.show()
-        self.resizeDocks([self.d_lib, self.d_prev], [250, 520], Qt.Horizontal)
-        self.resizeDocks([self.d_lib, self.d_align], [520, 220], Qt.Vertical)
-        self.resizeDocks([self.d_prev, self.d_cut, self.d_ctx], [400, 170, 220], Qt.Vertical)
-        self.resizeDocks([self.d_tasks], [110], Qt.Vertical)
+        self.resizeDocks([self.d_lib, self.d_prev], [250, 500], Qt.Horizontal)
+        self.resizeDocks([self.d_lib, self.d_align], [560, 200], Qt.Vertical)
+        self.resizeDocks([self.d_prev, self.d_cut, self.d_ctx], [400, 190, 240], Qt.Vertical)
 
-    def _act(self, text, fn, key=None, tip=None, icon=None, checkable=False):
+    def _act(self, text, fn, key=None, tip=None, icon=None, checkable=False):  # noqa: icon 是主题图标名
         a = QAction(text, self)
         if key:
             a.setShortcut(QKeySequence(key))
@@ -279,15 +310,11 @@ class MainWindow(QMainWindow):
         if tip:
             a.setToolTip(tip); a.setStatusTip(tip)
         if icon is not None:
-            a.setIcon(self.style_icon(icon))
+            a.setIcon(theme.icon(icon))
         a.setCheckable(checkable)
         a.setMenuRole(QAction.NoRole)   # Mac 上不要被挪进「应用程序」菜单，留在看得见的地方
         a.triggered.connect(fn)
         return a
-
-    def style_icon(self, sp):
-        from PySide6.QtWidgets import QStyle
-        return QApplication.style().standardIcon(getattr(QStyle.StandardPixmap, sp))
 
     def _cur_do(self, fn):
         if self.cur:
@@ -301,20 +328,20 @@ class MainWindow(QMainWindow):
         A = self.acts = {}
         # 文件
         fm = m.addMenu("文件")
-        A["root"] = self._act("选择媒体库文件夹…", self.choose_root, "Ctrl+O", icon="SP_DirOpenIcon")
-        A["rescan"] = self._act("重新扫描媒体库", self.rescan, "F5", icon="SP_BrowserReload")
+        A["root"] = self._act("选择媒体库文件夹…", self.choose_root, "Ctrl+O", icon="folder")
+        A["rescan"] = self._act("重新扫描媒体库", self.rescan, "F5", icon="refresh")
         A["open_root"] = self._act("在文件夹中打开媒体库", lambda: self.lib and QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self.lib.root))))
         A["open_exp"] = self._act("打开导出文件夹", self._open_export_dir)
         A["settings"] = self._act("设置…", self.open_settings, "Ctrl+,", "常规 / 对齐 / 字幕样式",
-                                  icon="SP_FileDialogDetailedView")
+                                  icon="settings")
         A["quit"] = self._act("退出", self.close, "Ctrl+Q")
         for k in ("root", "rescan", "open_root", "open_exp", None, "settings", None, "quit"):
             fm.addSeparator() if k is None else fm.addAction(A[k])
         # 搜索
         sm = m.addMenu("搜索")
         A["find"] = self._act("搜索框", lambda: (self.q.setFocus(), self.q.selectAll()), "Ctrl+F")
-        A["search"] = self._act("执行搜索", self.do_search, icon="SP_FileDialogContentsView")
+        A["search"] = self._act("执行搜索", self.do_search, icon="search")
         sm.addAction(A["find"]); sm.addAction(A["search"]); sm.addSeparator()
         for c in (self.c_exact, self.c_order, self.c_single, self.c_video):
             a = QAction(c.text(), self, checkable=True); a.setChecked(c.isChecked())
@@ -325,17 +352,17 @@ class MainWindow(QMainWindow):
             sm.addAction(self._act(f"只看：{t}", lambda _=False, i=i: self.tabs.setCurrentIndex(i), f"Ctrl+{i + 1}"))
         # 片段
         cm = m.addMenu("片段")
-        A["play"] = self._act("播放本句", self.play_clip, "Ctrl+Return", icon="SP_MediaPlay")
-        A["prev"] = self._act("上一条", lambda: self.step(-1), "Ctrl+Up", icon="SP_MediaSkipBackward")
-        A["next"] = self._act("下一条", lambda: self.step(1), "Ctrl+Down", icon="SP_MediaSkipForward")
+        A["play"] = self._act("播放本句", self.play_clip, "Ctrl+Return", icon="play")
+        A["prev"] = self._act("上一条", lambda: self.step(-1), "Ctrl+Up", icon="prev")
+        A["next"] = self._act("下一条", lambda: self.step(1), "Ctrl+Down", icon="next")
         A["loop"] = self._act("连播", lambda on: self.c_loop.setChecked(on), checkable=True)
         self.c_loop.toggled.connect(A["loop"].setChecked)
-        A["save_cut"] = self._act("保存微调", self.save_cut, "Ctrl+S", icon="SP_DialogSaveButton")
+        A["save_cut"] = self._act("保存微调", self.save_cut, "Ctrl+S", icon="bookmark")
         A["reset_cut"] = self._act("恢复自动切点", self.reset_cut)
         A["ctx"] = self._act("看上下文", lambda: self._cur_do(lambda h: (self.show_context(h), self.d_ctx.raise_())))
-        A["collect"] = self._act("采集到当前包", lambda: self._cur_do(self.collect), "Ctrl+D", icon="SP_DialogApplyButton")
+        A["collect"] = self._act("采集到当前包", lambda: self._cur_do(self.collect), "Ctrl+D", icon="collect")
         A["export_one"] = self._act("导出这一条…", lambda: self._cur_do(self.export_one), "Ctrl+E",
-                                    icon="SP_ArrowDown")
+                                    icon="export")
         for k in ("play", "prev", "next", "loop", None, "save_cut", "reset_cut", "ctx", None, "collect", "export_one"):
             cm.addSeparator() if k is None else cm.addAction(A[k])
         spm = cm.addMenu("倍速")
@@ -346,17 +373,17 @@ class MainWindow(QMainWindow):
             a.triggered.connect(lambda _=False, i=i: self.speed.setCurrentIndex(i))
         # 采集包
         pm = m.addMenu("采集包")
-        A["new_pack"] = self._act("新建采集包…", self.new_pack, "Ctrl+N", icon="SP_FileDialogNewFolder")
+        A["new_pack"] = self._act("新建采集包…", self.new_pack, "Ctrl+N", icon="newpack")
         A["pack_up"] = self._act("选中条目上移", lambda: self._pack_move(-1))
         A["pack_down"] = self._act("选中条目下移", lambda: self._pack_move(1))
         A["pack_rm"] = self._act("移除选中条目", self._pack_remove)
-        A["export_pack"] = self._act("导出此包…", self.export_pack, "Ctrl+Shift+E", icon="SP_DialogSaveButton")
+        A["export_pack"] = self._act("导出此包…", self.export_pack, "Ctrl+Shift+E", icon="package")
         for k in ("new_pack", None, "pack_up", "pack_down", "pack_rm", None, "export_pack"):
             pm.addSeparator() if k is None else pm.addAction(A[k])
         # 对齐
         am = m.addMenu("对齐")
         A["align_center"] = self._act("对齐中心…", self.open_align_center, "Ctrl+L", "选集对齐、看进度和失败原因",
-                                      icon="SP_ComputerIcon")
+                                      icon="wave")
         A["align_cur"] = self._act("对齐当前这一集", lambda: self._cur_do(lambda h: self.queue_keys([h.media_key], True)))
         A["align_show"] = self._act("对齐选中的作品", self._align_selected_shows)
         A["align_all"] = self._act("对齐全部未对齐的集…", self._align_all)
@@ -373,27 +400,47 @@ class MainWindow(QMainWindow):
             vm.addAction(d.toggleViewAction())
         vm.addSeparator()
         A["toolbar"] = self.toolbar_toggle = vm.addAction("工具栏")
-        A["layout"] = self._act("恢复默认布局", self._default_layout, icon="SP_TitleBarNormalButton")
+        A["layout"] = self._act("恢复默认布局", self._default_layout, icon="layout")
         vm.addAction(A["layout"])
         # 帮助
         hm = m.addMenu("帮助")
         hm.addAction(self._act("使用说明（网页）", lambda: QDesktopServices.openUrl(
             QUrl("https://github.com/wimmekhi/clipper/blob/main/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.md"))))
-        hm.addAction(self._act("检查更新…", lambda: self.check_update(manual=True)))
+        A["update"] = self._act("检查更新 / 一键更新…", self._update_clicked, icon="update")
+        hm.addAction(A["update"])
         hm.addAction(self._act(f"关于（版本 {VERSION}）", lambda: QMessageBox.about(
             self, APP, f"{APP} {VERSION}\nhttps://github.com/wimmekhi/clipper")))
 
-        # 工具栏：常用功能一排排开
+        # 工具栏：图标 + 文字，按「媒体库 / 播放 / 片段 / 采集包 / 对齐」分组；右侧固定 更新 + 设置
         tb = QToolBar("工具栏", self); tb.setObjectName("toolbar_main")
-        tb.setToolButtonStyle(Qt.ToolButtonTextUnderIcon); tb.setIconSize(QSize(20, 20))
+        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon); tb.setIconSize(QSize(18, 18))
         tb.setMovable(False)
-        for k in ("root", "rescan", None, "search", "play", "prev", "next", None, "save_cut", "collect",
-                  "export_one", None, "new_pack", "export_pack", None, "align_center", None, "settings", "layout"):
+        A["prev"].setIconText("上一条"); A["next"].setIconText("下一条"); A["play"].setIconText("播放")
+        A["collect"].setIconText("采集"); A["export_one"].setIconText("导出这条")
+        A["root"].setIconText("媒体库"); A["rescan"].setIconText("扫描"); A["export_pack"].setIconText("导出包")
+        A["new_pack"].setIconText("新建包"); A["align_center"].setIconText("对齐中心"); A["settings"].setIconText("设置")
+        for k in ("root", "rescan", None, "prev", "play", "next", None, "save_cut", "collect", "export_one", None,
+                  "new_pack", "export_pack", None, "align_center"):
             tb.addSeparator() if k is None else tb.addAction(A[k])
+        sp = QWidget(); sp.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(sp)
+        # 一键更新按钮：平时是「检查更新」；查到新版就变成高亮的「更新到 x.y.z」，点一下直接下载替换
+        self.upd_btn = QToolButton(); self.upd_btn.setObjectName("update")
+        self.upd_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.upd_btn.setIcon(theme.icon("update")); self.upd_btn.setIconSize(QSize(16, 16))
+        self.upd_btn.setText("检查更新"); self.upd_btn.setToolTip(f"当前版本 {VERSION}，点一下检查新版")
+        self.upd_btn.setCursor(Qt.PointingHandCursor)
+        self.upd_btn.clicked.connect(self._update_clicked)
+        self._upd_result = None
+        tb.addWidget(self.upd_btn)
+        tb.addAction(A["settings"])
         self.addToolBar(Qt.TopToolBarArea, tb)
         self.toolbar = tb
         self.toolbar_toggle.setCheckable(True); self.toolbar_toggle.setChecked(True)
         self.toolbar_toggle.toggled.connect(tb.setVisible)
+        self.ver_lb = QLabel(f"版本 {VERSION}"); self.ver_lb.setObjectName("small")
+        self.statusBar().addPermanentWidget(self.ver_lb)
+        self.statusBar().setSizeGripEnabled(False)
         if self._autostart:
             QTimer.singleShot(5000, lambda: self.check_update(manual=False))
 
@@ -498,7 +545,7 @@ class MainWindow(QMainWindow):
         if not self.lib:
             return
         if not force and not self.lib_settings()["auto_align"]:
-            self.al_lb.setText("手动对齐：右键媒体库里的作品，或打开对齐中心选集")
+            self.al_lb.setText("右键作品或到对齐中心选集")
             return
         if self.align_worker and self.align_worker.isRunning():
             self.align_worker.settings = self.lib_settings()
@@ -675,10 +722,36 @@ class MainWindow(QMainWindow):
             card.context.connect(self.show_context)
             card.export_one.connect(self.export_one)
             it = QListWidgetItem()
-            it.setSizeHint(card.sizeHint() + QSize(0, 4))
+            vw = self._card_width()
+            it.setSizeHint(QSize(vw, card.heightForWidth(vw) + 4))
             self.results.addItem(it)
             self.results.setItemWidget(it, card)
         self.shown = min(len(lst), self.shown + PAGE)
+
+    def _card_width(self):
+        return max(200, self.results.viewport().width() - 4)
+
+    def _relayout_cards(self):
+        vw = self._card_width()
+        for i in range(self.results.count()):
+            it = self.results.item(i)
+            card = self.results.itemWidget(it)
+            if card is not None:
+                it.setSizeHint(QSize(vw, card.heightForWidth(vw) + 4))
+
+    def eventFilter(self, obj, ev):
+        from PySide6.QtCore import QEvent
+        if obj is self.results.viewport() and ev.type() == QEvent.Resize:
+            self._relayout_timer.start()
+        return super().eventFilter(obj, ev)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        tb = getattr(self, "toolbar", None)
+        if tb is not None:   # 窗口窄时工具栏只留图标，保证右上角的「更新」「设置」一直看得见
+            style = Qt.ToolButtonTextBesideIcon if self.width() >= 1280 else Qt.ToolButtonIconOnly
+            if tb.toolButtonStyle() != style:
+                tb.setToolButtonStyle(style)
 
     def _maybe_more(self, v):
         sb = self.results.verticalScrollBar()
@@ -979,8 +1052,42 @@ class MainWindow(QMainWindow):
         self._upd_check.done.connect(lambda r: self._update_checked(r, manual))
         self._upd_check.start()
 
+    def _update_clicked(self):
+        """工具栏的更新按钮：已经查到新版就直接下载替换（一键）；还没查过就先查。"""
+        from .. import updater
+        r = self._upd_result
+        if r and r.get("url") and updater.is_newer(r.get("version", "")):
+            if updater.current_target() is None:     # 源码运行：没有可替换的程序，去下载页
+                QDesktopServices.openUrl(QUrl(r["page"]))
+                return
+            ok = QMessageBox.question(
+                self, "一键更新", f"更新到 {r['version']}（约 {r.get('size', 0)/1e6:.0f} MB）？\n"
+                "下载完软件会自动关闭、替换并重新打开；对齐结果和采集包都在媒体库里，不受影响。")
+            if ok == QMessageBox.Yes:
+                self._download_update(r)
+            return
+        self.check_update(manual=True)
+
+    def _mark_update(self, r: dict | None):
+        from .. import updater
+        self._upd_result = r
+        hot = bool(r and r.get("url") and updater.is_newer(r.get("version", "")))
+        self.upd_btn.setProperty("hot", "true" if hot else "false")
+        self.upd_btn.setIcon(theme.icon("update", "#FFFFFF" if hot else theme.ACCENT_D))
+        if hot:
+            self.upd_btn.setText(f"更新到 {r['version']}")
+            self.upd_btn.setToolTip(f"有新版 {r['version']}（当前 {VERSION}），点一下下载并自动替换")
+            self.statusBar().showMessage(f"有新版 {r['version']}，点右上角「更新到 {r['version']}」一键更新", 15000)
+        else:
+            self.upd_btn.setText("检查更新")
+        self.upd_btn.style().unpolish(self.upd_btn); self.upd_btn.style().polish(self.upd_btn)
+
     def _update_checked(self, r: dict, manual: bool):
         from .. import updater
+        if not r.get("error"):
+            self._mark_update(r)
+        if not manual:
+            return      # 启动时自动查：只把更新按钮点亮，不弹窗打扰
         if r.get("error"):
             if manual:
                 QMessageBox.warning(self, "检查更新", "连不上 GitHub：" + r["error"][:200])
@@ -989,8 +1096,6 @@ class MainWindow(QMainWindow):
         if not updater.is_newer(ver):
             if manual:
                 QMessageBox.information(self, "检查更新", f"已经是最新版（{VERSION}）。")
-            return
-        if not manual and self.qs.value("skip_version", "") == ver:
             return
         if not r.get("url"):
             if manual:
@@ -1004,12 +1109,9 @@ class MainWindow(QMainWindow):
         if notes:
             box.setDetailedText(notes)
         b_now = box.addButton("一键更新", QMessageBox.AcceptRole)
-        b_skip = box.addButton("跳过这个版本", QMessageBox.RejectRole)
         box.addButton("以后再说", QMessageBox.RejectRole)
         box.exec()
-        if box.clickedButton() is b_skip:
-            self.qs.setValue("skip_version", ver)
-        elif box.clickedButton() is b_now:
+        if box.clickedButton() is b_now:
             if updater.current_target() is None:
                 QDesktopServices.openUrl(QUrl(r["page"]))
                 return
@@ -1060,25 +1162,8 @@ class MainWindow(QMainWindow):
 
 
 def light_palette(app):
-    """不跟随系统深色模式：固定用浅色配色，否则 Mac 深色模式下字是白的、背景是浅的，看不见。"""
-    from PySide6.QtGui import QPalette, QColor
-    app.setStyle("Fusion")
-    p = QPalette()
-    C = QPalette.ColorRole
-    for role, c in [(C.Window, "#F3F4F6"), (C.WindowText, "#111827"), (C.Base, "#FFFFFF"),
-                    (C.AlternateBase, "#F9FAFB"), (C.Text, "#111827"), (C.Button, "#FFFFFF"),
-                    (C.ButtonText, "#111827"), (C.BrightText, "#DC2626"), (C.Highlight, "#2563EB"),
-                    (C.HighlightedText, "#FFFFFF"), (C.ToolTipBase, "#FFFFFF"), (C.ToolTipText, "#111827"),
-                    (C.PlaceholderText, "#9CA3AF"), (C.Link, "#2563EB"), (C.Light, "#FFFFFF"),
-                    (C.Midlight, "#E5E7EB"), (C.Mid, "#D1D5DB"), (C.Dark, "#9CA3AF"), (C.Shadow, "#6B7280")]:
-        p.setColor(role, QColor(c))
-    for role in (C.WindowText, C.Text, C.ButtonText):
-        p.setColor(QPalette.ColorGroup.Disabled, role, QColor("#9CA3AF"))
-    app.setPalette(p)
-    try:
-        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
-    except Exception:
-        pass
+    """固定浅色小清新主题（见 theme.py）。"""
+    theme.apply_theme(app)
 
 
 def main():

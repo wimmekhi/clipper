@@ -15,7 +15,7 @@ from .. import align
 
 MODELS = ["small", "base", "tiny", "medium", "large-v3-turbo"]
 STATUS_TEXT = {"none": "未对齐", "queued": "排队中", "running": "对齐中", "done": "完成", "error": "失败"}
-STATUS_COLOR = {"done": "#059669", "error": "#DC2626", "running": "#2563EB", "queued": "#7C3AED"}
+from .theme import STATUS_COLOR
 
 
 class EngineProbe(QThread):
@@ -70,9 +70,9 @@ class AlignCenter(QDialog):
         # 当前进度
         box = QWidget(); bl = QVBoxLayout(box); bl.setContentsMargins(0, 6, 0, 6)
         self.cur_lb = QLabel("空闲"); self.cur_lb.setWordWrap(True); self.cur_lb.setStyleSheet("font-size:14px;")
-        self.step_lb = QLabel(""); self.step_lb.setWordWrap(True); self.step_lb.setStyleSheet("color:#374151;")
+        self.step_lb = QLabel(""); self.step_lb.setWordWrap(True); self.step_lb.setStyleSheet("color:#475569;")
         self.bar = QProgressBar(); self.bar.setRange(0, 1000); self.bar.setFormat("%p%")
-        self.count_lb = QLabel(""); self.count_lb.setStyleSheet("color:#6B7280;")
+        self.count_lb = QLabel(""); self.count_lb.setObjectName("muted")
         for w in (self.cur_lb, self.step_lb, self.bar, self.count_lb):
             bl.addWidget(w)
         v.addWidget(box)
@@ -125,7 +125,7 @@ class AlignCenter(QDialog):
         hh.setSectionResizeMode(3, QHeaderView.Stretch)
         split.addWidget(self.table)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(3000)
-        self.log.setStyleSheet("font-family:Menlo,Consolas,monospace;font-size:11px;background:#fff;")
+        self.log.setStyleSheet("font-family:Menlo,Consolas,monospace;font-size:11px;")
         split.addWidget(self.log)
         split.setSizes([430, 180])
         v.addWidget(split, 1)

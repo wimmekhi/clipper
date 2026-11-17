@@ -141,6 +141,11 @@ def _ui_test():
     assert all(m in menus for m in need), f"菜单缺：{menus}"
     tb = w.findChild(QToolBar, "toolbar_main")
     assert tb and len(tb.actions()) >= 15, "工具栏缺"
+    assert w.upd_btn.isVisible() and w.upd_btn.text() == "检查更新", "工具栏没有一键更新按钮"
+    w._mark_update({"version": "99.0.0", "url": "https://example.invalid/x.zip", "size": 1})
+    assert w.upd_btn.text() == "更新到 99.0.0" and w.upd_btn.property("hot") == "true", "更新按钮没点亮"
+    w._mark_update(None)
+    assert "glass" in app.styleSheet() and w.d_lib.titleBarWidget() is not None, "主题没生效"
     docks = [x for x in w.findChildren(QDockWidget) if x.isVisible()]
     mins = {x.windowTitle(): x.minimumSizeHint().width() for x in docks}
     cen = w.centralWidget().minimumSizeHint().width()
