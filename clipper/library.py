@@ -15,6 +15,10 @@ from . import subs
 VIDEO_EXT = {".mp4", ".mkv", ".mov", ".m4v", ".avi", ".webm"}
 SUB_EXT = (".srt", ".ass", ".ssa")
 DATA_DIR = ".clipper"
+INDEX_VER = 2            # 1.0.7：加了「跨两条字幕的句子」和「识别补出的台词」
+JOIN_BASE = 1_000_000    # 跨两条字幕拼起来的句子：idx = JOIN_BASE + 前一条的 idx
+AUTO_BASE = 2_000_000    # 字幕里没有、语音识别补出来的台词：idx = AUTO_BASE + 序号
+_END_PUNCT = re.compile(r"""[.?!…♪]["'”’)\]]*\s*$""")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS media(
@@ -158,6 +162,16 @@ class Library:
         db.execute("PRAGMA journal_mode=DELETE")
         db.execute("PRAGMA synchronous=FULL")
         db.executescript(SCHEMA)
+        # 1.0.7 新列（老库直接补上）
+        have = {r[1] for r in db.execute("PRAGMA table_info(cues)")}
+        if "src" not in have:
+            db.execute("ALTER TABLE cues ADD COLUMN src TEXT DEFAULT 'sub'")   # sub / join / auto
+        if "split" not in have:
+            db.execute("ALTER TABLE cues ADD COLUMN split INTEGER")            # join：前半句的字符数
+        have = {r[1] for r in db.execute("PRAGMA table_info(media)")}
+        if "sub_changed" not in have:
+            db.execute("ALTER TABLE media ADD COLUMN sub_changed INTEGER DEFAULT 0")
+        db.commit()
         return db
 
     # ---------- 路径 ----------
@@ -247,6 +261,8 @@ class Library:
         return f"{st.st_size}:{int(st.st_mtime)}"
 
     def scan(self, progress=None) -> dict:
+        if int(self.get_setting("index_ver", 1) or 1) < INDEX_VER:
+            self.reindex_all(progress)
         found = self.discover()
         stats = dict(new=0, updated=0, removed=0, total=len(found))
         existing = {r["key"]: r for r in self.db.execute("SELECT * FROM media")}
@@ -271,7 +287,8 @@ class Library:
                 mid = row["id"]
                 if row["video_sig"] != vid_sig and vid:
                     # 换了视频文件 → 对齐作废
-                    self.db.execute("UPDATE media SET align_status='none' WHERE id=?", (mid,))
+                    self.db.execute("UPDATE media SET align_status='none', sub_changed=? WHERE id=?",
+                                    (1 if row["align_status"] == "done" else 0, mid))
                 self.db.execute("UPDATE media SET rel_video=?,rel_sub=?,rel_sub_zh=?,video_sig=? WHERE id=?",
                                 (rel(vid), rel(sub), rel(zh), vid_sig, mid))
             if sub and (row is None or row["sub_sig"] != sub_sig):
@@ -279,7 +296,9 @@ class Library:
                 self.db.execute("UPDATE media SET sub_sig=? WHERE id=?", (sub_sig, mid))
                 if row is not None:
                     stats["updated"] += 1
-                    self.db.execute("UPDATE media SET align_status='none' WHERE id=?", (mid,))
+                    # 字幕换了：之前的对齐不再对得上，标出来让用户一键重新对齐
+                    self.db.execute("UPDATE media SET align_status='none', sub_changed=? WHERE id=?",
+                                    (1 if row["align_status"] == "done" or row["sub_changed"] else 0, mid))
             self.db.commit()
         for key, row in existing.items():
             if key not in found:
@@ -296,6 +315,34 @@ class Library:
                     pass
         return stats
 
+    def reindex_all(self, progress=None):
+        """索引格式升级：按新规则重建全部字幕索引，已有的对齐结果原样接回去（不用重新对齐）。"""
+        rows = self.db.execute("SELECT * FROM media WHERE rel_sub IS NOT NULL").fetchall()
+        for n, r in enumerate(rows):
+            if progress:
+                progress(n, len(rows), "升级索引 " + r["key"])
+            sub = self.abs(r["rel_sub"])
+            if not sub or not sub.exists():
+                continue
+            zh = self.abs(r["rel_sub_zh"])
+            try:
+                self._index_subs(r["id"], sub, zh if zh and zh.exists() else None)
+            except Exception:
+                continue
+            f = self.align_file(r["key"])
+            if r["align_status"] == "done" and f.exists():
+                try:
+                    self.apply_alignment(r["id"], json.loads(f.read_text("utf-8")), commit=False)
+                except Exception:
+                    pass
+            if n % 50 == 0:
+                self.db.commit()
+        self.db.commit()
+        self.set_setting("index_ver", INDEX_VER)
+
+    def changed_keys(self) -> list[str]:
+        return [r[0] for r in self.db.execute("SELECT key FROM media WHERE sub_changed=1 ORDER BY key")]
+
     def _drop_media(self, mid: int):
         ids = [r[0] for r in self.db.execute("SELECT id FROM cues WHERE media_id=?", (mid,))]
         self.db.executemany("DELETE FROM fts_exact WHERE rowid=?", [(i,) for i in ids])
@@ -310,22 +357,90 @@ class Library:
         self.db.execute("DELETE FROM cues WHERE media_id=?", (mid,))
         cues = subs.load_cues(sub, zh)
         for c in cues:
-            cur = self.db.execute(
-                "INSERT INTO cues(media_id,idx,start,end,en,zh,speakers) VALUES(?,?,?,?,?,?,?)",
-                (mid, c.idx, c.start, c.end, c.en, c.zh, c.speakers))
-            rid = cur.lastrowid
-            self.db.execute("INSERT INTO fts_exact(rowid,en,zh) VALUES(?,?,?)", (rid, c.en, c.zh))
-            self.db.execute("INSERT INTO fts_stem(rowid,en) VALUES(?,?)", (rid, c.en))
+            self._add_cue(mid, c.idx, c.start, c.end, c.en, c.zh, c.speakers)
+        # 一句话被字幕拆成两行（前一行没有句末标点、两行挨着）：另存一条拼起来的，搜整句也能命中
+        for a, b in zip(cues, cues[1:]):
+            if not a.en or not b.en or b.start - a.end > 1.0 or _END_PUNCT.search(a.en):
+                continue
+            self._add_cue(mid, JOIN_BASE + a.idx, a.start, b.end, a.en + " " + b.en,
+                          " ".join(x for x in (a.zh, b.zh) if x), max(a.speakers, b.speakers), "join", len(a.en))
+
+    def _add_cue(self, mid, idx, start, end, en, zh, speakers, src="sub", split=None, a=None):
+        a = a or (None, None, None)
+        cur = self.db.execute(
+            "INSERT OR REPLACE INTO cues(media_id,idx,start,end,en,zh,speakers,src,split,a_start,a_end,a_score)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (mid, idx, start, end, en, zh, speakers, src, split, *a))
+        rid = cur.lastrowid
+        self.db.execute("INSERT INTO fts_exact(rowid,en,zh) VALUES(?,?,?)", (rid, en, zh))
+        self.db.execute("INSERT INTO fts_stem(rowid,en) VALUES(?,?)", (rid, en))
+        return rid
 
     # ---------- 对齐结果 ----------
-    def apply_alignment(self, mid: int, data: dict):
+    def apply_alignment(self, mid: int, data: dict, commit=True):
         rows = data.get("cues", [])
         self.db.executemany(
             "UPDATE cues SET a_start=?,a_end=?,a_score=? WHERE media_id=? AND idx=?",
             [(r["a_start"], r["a_end"], r["score"], mid, r["idx"]) for r in rows])
-        self.db.execute("UPDATE media SET align_status='done',align_msg=?,aligned_at=? WHERE id=?",
+        # 拼起来的句子：前半句的起点 → 后半句的终点
+        by = {r["idx"]: r for r in rows}
+        upd = []
+        for j in self.db.execute("SELECT idx FROM cues WHERE media_id=? AND src='join'", (mid,)).fetchall():
+            a, b = by.get(j[0] - JOIN_BASE), None
+            if a is not None:
+                nxt = self.db.execute("SELECT idx FROM cues WHERE media_id=? AND src='sub' AND idx>? ORDER BY idx "
+                                      "LIMIT 1", (mid, a["idx"])).fetchone()
+                b = by.get(nxt[0]) if nxt else None
+            if a and b and a["a_start"] is not None and b["a_end"] is not None:
+                upd.append((a["a_start"], b["a_end"], min(a["score"], b["score"]), mid, j[0]))
+        self.db.executemany("UPDATE cues SET a_start=?,a_end=?,a_score=? WHERE media_id=? AND idx=?", upd)
+        self._add_auto_lines(mid, data.get("words", []))
+        self.db.execute("UPDATE media SET align_status='done',align_msg=?,aligned_at=?,sub_changed=0 WHERE id=?",
                         (data.get("summary", ""), time.time(), mid))
-        self.db.commit()
+        if commit:
+            self.db.commit()
+
+    def _add_auto_lines(self, mid: int, words: list[dict]):
+        """字幕没写到的说话（漏翻、歌词、字幕删掉的口头禅）：识别出来的词里不在任何字幕时间段内的，连成一句一句。"""
+        old = [r[0] for r in self.db.execute("SELECT id FROM cues WHERE media_id=? AND src='auto'", (mid,))]
+        self.db.executemany("DELETE FROM fts_exact WHERE rowid=?", [(i,) for i in old])
+        self.db.executemany("DELETE FROM fts_stem WHERE rowid=?", [(i,) for i in old])
+        self.db.execute("DELETE FROM cues WHERE media_id=? AND src='auto'", (mid,))
+        if not words:
+            return
+        spans = []
+        for r in self.db.execute("SELECT start,end,a_start,a_end FROM cues WHERE media_id=? AND src='sub'", (mid,)):
+            spans.append((r["start"], r["end"]))
+            if r["a_start"] is not None:
+                spans.append((r["a_start"], r["a_end"]))
+        spans.sort()
+        import bisect
+        starts = [s for s, _ in spans]
+        reach, mx = [], -1.0          # 前缀最远终点：判断某时刻有没有被字幕盖住
+        for _, e in spans:
+            mx = max(mx, e); reach.append(mx)
+
+        def covered(t0, t1):
+            k = bisect.bisect_right(starts, t1 + 0.25) - 1
+            return k >= 0 and reach[k] >= t0 - 0.25
+        groups, cur = [], []
+        for w in words:
+            if not w.get("w") or covered(w["start"], w["end"]):
+                if cur:
+                    groups.append(cur); cur = []
+                continue
+            if cur and w["start"] - cur[-1]["end"] > 0.9:
+                groups.append(cur); cur = []
+            cur.append(w)
+        if cur:
+            groups.append(cur)
+        n = 0
+        for g in groups:
+            text = " ".join(x["w"] for x in g).strip()
+            if len(g) < 3 or len(re.findall(r"[A-Za-z]+", text)) < 3:
+                continue
+            n += 1
+            self._add_cue(mid, AUTO_BASE + n, g[0]["start"], g[-1]["end"], text, "", 1, "auto",
+                          a=(g[0]["start"], g[-1]["end"], 0.9))
 
     def words(self, key: str) -> list[dict]:
         f = self.align_file(key)
@@ -448,6 +563,23 @@ class Library:
     def media_by_key(self, key):
         return self.db.execute("SELECT * FROM media WHERE key=?", (key,)).fetchone()
 
+    def script(self, media_id: int):
+        """整集台词本：字幕 + 识别补出的，按时间排（不含拼接出来的句子）。"""
+        return self.db.execute("SELECT * FROM cues WHERE media_id=? AND COALESCE(src,'sub')!='join' "
+                               "ORDER BY COALESCE(a_start,start)", (media_id,)).fetchall()
+
     def context(self, media_id: int, idx: int, n=1):
-        return self.db.execute("SELECT * FROM cues WHERE media_id=? AND idx BETWEEN ? AND ? ORDER BY idx",
-                               (media_id, idx - n, idx + n)).fetchall()
+        rows = self.script(media_id)
+        if idx >= JOIN_BASE and idx < AUTO_BASE:
+            idx -= JOIN_BASE
+        k = next((i for i, r in enumerate(rows) if r["idx"] == idx), None)
+        if k is None:
+            return []
+        return rows[max(0, k - n): k + n + 1]
+
+    def episodes(self, show: str | None = None):
+        sql = ("SELECT m.*, (SELECT COUNT(*) FROM cues c WHERE c.media_id=m.id AND c.src='sub') n_cues, "
+               "(SELECT COUNT(*) FROM cues c WHERE c.media_id=m.id AND c.src='auto') n_auto FROM media m")
+        if show:
+            return self.db.execute(sql + " WHERE m.show=? ORDER BY m.season, m.episode, m.key", (show,)).fetchall()
+        return self.db.execute(sql + " ORDER BY m.show, m.season, m.episode, m.key").fetchall()

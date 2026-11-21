@@ -1,4 +1,5 @@
-"""1.0.6 小清新玻璃主题：薄荷 → 天蓝 → 淡紫的柔和底色，面板是半透明磨砂玻璃卡片，线条图标统一青绿色。
+"""1.0.7：结构参照 quipclipper（顶栏导航 + 媒体库 / 搜索 / 工作台分页），配色沿用 1.0.6 的小清新：
+1.0.6 小清新玻璃主题：薄荷 → 天蓝 → 淡紫的柔和底色，面板是半透明磨砂玻璃卡片，线条图标统一青绿色。
 所有颜色只在这里定义；Win / Mac 一样的样子（不跟随系统深色模式）。"""
 from __future__ import annotations
 
@@ -131,6 +132,48 @@ QToolButton#dockBtn:hover {{ background: rgba(15,118,110,0.10); }}
 QFrame#card {{ background: rgba(255,255,255,0.80); border: 1px solid rgba(255,255,255,0.95); border-radius: 14px; }}
 QFrame#card:hover {{ border: 1px solid rgba(20,184,166,0.55); background: rgba(255,255,255,0.94); }}
 QFrame#videoFrame {{ background: #0F172A; border-radius: 12px; }}
+
+/* ---------------- 1.0.7 页面式布局 ---------------- */
+QFrame#topbar {{ background: rgba(255,255,255,0.86); border: none; border-bottom: 1px solid {LINE}; }}
+QLabel#brand {{ font-size: 15px; font-weight: 700; color: {TEXT}; }}
+QFrame#searchbox {{ background: #FFFFFF; border: 1px solid rgba(15,118,110,0.22); border-radius: 10px; }}
+QLineEdit#topsearch {{ border: none; background: transparent; font-size: 14px; padding: 6px 4px; }}
+QComboBox#scope {{ background: #CCFBF1; color: {ACCENT_D}; border: none; border-radius: 7px; font-weight: 600;
+    font-size: 12px; padding: 3px 22px 3px 10px; }}
+QLabel#kbd {{ border: 1px solid rgba(15,118,110,0.25); border-radius: 5px; padding: 0 6px; color: {TEXT2};
+    font-family: Menlo, Consolas, monospace; font-size: 11px; background: #F8FAFC; }}
+QToolButton#nav {{ border-radius: 9px; padding: 5px 12px; color: {TEXT2}; background: transparent; border: 1px solid transparent; }}
+QToolButton#nav:hover {{ color: {TEXT}; background: rgba(255,255,255,0.8); }}
+QToolButton#nav:checked {{ background: #FFFFFF; color: {TEXT}; font-weight: 600; border: 1px solid {LINE}; }}
+QToolButton#topbtn {{ border-radius: 9px; padding: 5px 8px; background: transparent; border: 1px solid transparent; }}
+QToolButton#topbtn:hover {{ background: rgba(255,255,255,0.85); border-color: {LINE}; }}
+QFrame#panel {{ background: rgba(255,255,255,0.80); border: 1px solid rgba(15,118,110,0.12); border-radius: 12px; }}
+QFrame#sidebar {{ background: transparent; }}
+QLabel#h1 {{ font-size: 21px; font-weight: 700; color: {TEXT}; }}
+QLabel#h2 {{ font-size: 14px; font-weight: 700; color: {TEXT}; }}
+QLabel#eyebrow {{ font-size: 11px; color: {TEXT2}; font-weight: 700; letter-spacing: 1px; }}
+QLabel#mono {{ font-family: Menlo, Consolas, monospace; color: {ACCENT_D}; font-size: 12px; }}
+QLabel#crumb {{ font-size: 14px; color: {TEXT2}; }}
+QFrame#banner {{ background: #FFFBEB; border: 1px solid #FDE68A; border-left: 4px solid #F59E0B; border-radius: 10px; }}
+QFrame#grouphdr {{ background: rgba(226,240,238,0.85); border-radius: 10px; }}
+QFrame#grouphdr:hover {{ background: rgba(204,251,241,0.9); }}
+QFrame#row {{ background: rgba(255,255,255,0.88); border-radius: 10px; border: 1px solid transparent; }}
+QFrame#row:hover {{ border: 1px solid rgba(20,184,166,0.35); }}
+QFrame#row[sel="true"] {{ background: #F0FDFA; border: 1px solid rgba(20,184,166,0.55); border-left: 3px solid {ACCENT}; }}
+QLabel#pct {{ background: rgba(15,118,110,0.08); border-radius: 9px; padding: 2px 8px; color: {TEXT2};
+    font-size: 11px; font-family: Menlo, Consolas, monospace; }}
+QPushButton#iconBtn {{ padding: 0; border-radius: 8px; }}
+QPushButton#iconPrimary {{ padding: 0; border-radius: 8px; border: none;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2DD4BF, stop:1 #38BDF8); }}
+QPushButton#iconPrimary:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #14B8A6, stop:1 #0EA5E9); }}
+QFrame#batchbar {{ background: rgba(255,255,255,0.94); border: 1px solid {LINE}; border-radius: 12px; }}
+QSplitter::handle {{ background: transparent; }}
+QSplitter::handle:hover {{ background: rgba(20,184,166,0.22); border-radius: 3px; }}
+QListWidget#script::item {{ padding: 6px 8px; border-radius: 0; border-bottom: 1px solid rgba(15,118,110,0.07); }}
+QListWidget#script::item:selected {{ background: #F0FDFA; color: {TEXT}; border-left: 3px solid {ACCENT}; }}
+QTreeWidget#episodes::item {{ padding: 7px 4px; }}
+QTreeWidget#shows::item {{ padding: 6px 6px; border-radius: 8px; }}
+QTreeWidget#shows::item:selected {{ background: rgba(20,184,166,0.16); color: {TEXT}; font-weight: 600; }}
 """
 
 
@@ -175,14 +218,14 @@ def paint_backdrop(p: QPainter, rect):
     """主窗口底色：薄荷 → 天蓝 → 淡紫的斜向渐变，再叠几团柔光，半透明面板压上去就有磨砂玻璃的感觉。"""
     W, H = rect.width(), rect.height()
     g = QLinearGradient(0, 0, W, H)
-    g.setColorAt(0.0, QColor("#E3F7F1"))
-    g.setColorAt(0.5, QColor("#E6F1FB"))
-    g.setColorAt(1.0, QColor("#F0ECFA"))
+    # 1.0.7：底色收淡，让内容卡片更清楚（更「专业」），只留一点薄荷 / 天蓝的气氛
+    g.setColorAt(0.0, QColor("#EEF8F5"))
+    g.setColorAt(0.5, QColor("#F1F6FB"))
+    g.setColorAt(1.0, QColor("#F4F2FA"))
     p.fillRect(rect, g)
-    for cx, cy, r, col in ((0.08, 0.05, 0.55, QColor(94, 234, 212, 95)),
-                           (0.92, 0.18, 0.50, QColor(125, 211, 252, 90)),
-                           (0.55, 1.05, 0.60, QColor(196, 181, 253, 70)),
-                           (0.05, 0.95, 0.40, QColor(253, 224, 200, 70))):
+    for cx, cy, r, col in ((0.08, 0.05, 0.55, QColor(94, 234, 212, 45)),
+                           (0.92, 0.18, 0.50, QColor(125, 211, 252, 40)),
+                           (0.55, 1.05, 0.60, QColor(196, 181, 253, 32))):
         rg = QRadialGradient(QPointF(cx * W, cy * H), r * max(W, H) * 0.7)
         rg.setColorAt(0.0, col)
         c2 = QColor(col); c2.setAlpha(0)
@@ -216,6 +259,16 @@ _ICONS = {
     "loop": '<path d="M17 3.5l3 3-3 3"/><path d="M4 11.5v-1a4 4 0 0 1 4-4h12"/><path d="M7 20.5l-3-3 3-3"/>'
             '<path d="M20 12.5v1a4 4 0 0 1-4 4H4"/>',
     "context": '<path d="M5 6h14M5 12h14M5 18h9"/>',
+    "film": '<rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M7.5 5v14M16.5 5v14M3.5 9.5h4M3.5 14.5h4M16.5 9.5h4M16.5 14.5h4"/>',
+    "star": '<path d="M12 4l2.5 5.1 5.6.8-4.05 3.95.95 5.6L12 16.8l-5 2.65.95-5.6L3.9 9.9l5.6-.8z"/>',
+    "scissors": '<circle cx="6.5" cy="7" r="2.5"/><circle cx="6.5" cy="17" r="2.5"/><path d="M8.6 8.4L20 17M8.6 15.6L20 7"/>',
+    "link": '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+    "back": '<path d="M19 12H5"/><path d="M11 6l-6 6 6 6"/>',
+    "plus": '<path d="M12 5v14M5 12h14"/>',
+    "minus": '<path d="M5 12h14"/>',
+    "fit": '<path d="M8 4H5a1 1 0 0 0-1 1v3M16 4h3a1 1 0 0 1 1 1v3M8 20H5a1 1 0 0 1-1-1v-3M16 20h3a1 1 0 0 0 1-1v-3"/>',
+    "library": '<path d="M5 4.5v15M9.5 4.5v15"/><path d="M14 5.5l4.5-1 2 14.5-4.5 1z"/>',
+    "script": '<path d="M7 3.5h10a1 1 0 0 1 1 1v15a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1z"/><path d="M9 8h6M9 12h6M9 16h4"/>',
     "log": '<path d="M7 3.5h7l4 4v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1z"/><path d="M9 12h6M9 16h6"/>',
 }
 

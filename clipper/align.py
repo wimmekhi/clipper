@@ -477,7 +477,7 @@ def align_media(lib, media_row, model="small", engine=None, mirror=True, progres
     words = transcribe(audio, model=model, engine=engine, mirror=mirror,
                        progress=lambda f, t="": say(0.05 + 0.9 * f, t))
     say(0.96, f"匹配字幕（识别出 {len(words)} 个词）…")
-    rows = lib.db.execute("SELECT idx,start,end,en FROM cues WHERE media_id=? ORDER BY idx",
+    rows = lib.db.execute("SELECT idx,start,end,en FROM cues WHERE media_id=? AND COALESCE(src,'sub')='sub' ORDER BY idx",
                           (media_row["id"],)).fetchall()
     cues = [dict(r) for r in rows]
     mapped = map_cues(cues, words)

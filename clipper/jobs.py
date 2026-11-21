@@ -47,7 +47,7 @@ def export_items(lib, items: list[dict], out_dir: Path, presets: list[str], styl
         for p in presets:
             if cancel():
                 return dict(ok=False, cancelled=True, errors=errors)
-            f = out_dir / p / f"{base}.mp4"
+            f = out_dir / p / f"{base}{export.out_ext(p, video)}"
             try:
                 export.export_clip(video, meta["start"], meta["end"], f, p, style, en=row["en"],
                                    zh=row["zh"] or "", matched=meta["matched"], title=meta["pattern"] or "",
@@ -65,7 +65,7 @@ def export_items(lib, items: list[dict], out_dir: Path, presets: list[str], styl
     comp = {}
     if make_compilation:
         for p, files in done.items():
-            if len(files) >= 2:
+            if len(files) >= 2 and not PRESETS[p].get("lossless"):   # 无损版各集编码不同，不能直接拼
                 try:
                     comp[p] = str(export.concat(files, out_dir / f"合集_{p}.mp4").name)
                 except Exception as ex:   # noqa

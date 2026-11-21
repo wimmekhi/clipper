@@ -181,7 +181,10 @@ class ExportDialog(QDialog):
         bl = QVBoxLayout(box)
         self.checks = {}
         for p in PRESETS:
-            c = QCheckBox(p); c.setChecked(True); bl.addWidget(c); self.checks[p] = c
+            lossless = PRESETS[p].get("lossless")
+            c = QCheckBox(p + ("（不重新编码，几乎瞬间出片；起点落在前一个关键帧，可能早零点几秒；不参与合集）"
+                               if lossless else ""))
+            c.setChecked(not lossless); bl.addWidget(c); self.checks[p] = c
         v.addWidget(box)
         self.comp = QCheckBox("同时拼成合集长视频（每个版本一条）"); self.comp.setChecked(count >= 2)
         self.comp.setEnabled(count >= 2)

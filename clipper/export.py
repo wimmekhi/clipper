@@ -17,7 +17,28 @@ PRESETS = {
     "横屏原版": dict(w=1280, h=720, burn=False, vertical=False),
     "竖屏烧字幕": dict(w=720, h=1280, burn=True, vertical=True),
     "竖屏无字幕": dict(w=720, h=1280, burn=False, vertical=True),
+    # 不重新编码，直接拷原片的画面和声音：几乎瞬间出片、画质无损；起点会落在前一个关键帧上（可能早零点几秒）
+    "横屏原画无损": dict(w=0, h=0, burn=False, vertical=False, lossless=True),
 }
+
+
+def out_ext(preset: str, video: Path) -> str:
+    if PRESETS[preset].get("lossless"):
+        return ".mkv" if Path(video).suffix.lower() in (".mkv", ".webm", ".avi") else ".mp4"
+    return ".mp4"
+
+
+def export_lossless(video: Path, start: float, end: float, out: Path) -> Path:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [tools.ffmpeg(), "-nostdin", "-y", "-v", "error", "-ss", f"{start:.3f}", "-i", str(Path(video).resolve()),
+           "-t", f"{max(0.2, end - start):.3f}", "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+           "-avoid_negative_ts", "make_zero", "-map_metadata", "-1"]
+    if out.suffix == ".mp4":
+        cmd += ["-movflags", "+faststart"]
+    r = tools.run(cmd + [str(out)])
+    if r.returncode:
+        raise RuntimeError(r.stderr.strip()[-600:])
+    return out
 
 
 def _default_font():
@@ -161,6 +182,8 @@ def export_clip(video: Path, start: float, end: float, out: Path, preset: str, s
                 src_w=None, src_h=None) -> Path:
     """start/end 已经是最终切点（含余量）。"""
     p = PRESETS[preset]
+    if p.get("lossless"):
+        return export_lossless(video, start, end, out)
     pad = pad or Padding()
     video = Path(video).resolve()
     dur = max(0.2, end - start)

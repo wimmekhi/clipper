@@ -89,6 +89,12 @@ class Hit:
     tier: str
     score: float
     matched: str = ""        # 命中的那段原文，用于高亮
+    src: str = "sub"         # sub 字幕 / join 跨两行拼起来 / auto 语音识别补出
+
+    @property
+    def pct(self) -> int:
+        """给人看的匹配度（0–100）。"""
+        return max(1, min(100, int(round(self.score / 12.3 * 100))))
 
     @property
     def label(self):
@@ -137,6 +143,8 @@ class Searcher:
             sql += " AND m.align_status='done'"
         if filters.get("video_only"):
             sql += " AND m.rel_video IS NOT NULL"
+        if not filters.get("machine"):
+            sql += " AND COALESCE(c.src,'sub')!='auto'"       # 识别补出的台词：勾了「含识别台词」才搜
         sql += " LIMIT %d" % limit
         try:
             return self.lib.db.execute(sql, args).fetchall()
@@ -159,6 +167,16 @@ class Searcher:
             sline = " ".join(stem(t) for t in toks) + " "
             m_e = rx_e.search(" " + line)
             m_s = rx_s.search(" " + sline)
+            src = row["src"] if "src" in row.keys() else "sub"
+            if src == "join":
+                # 拼起来的句子只在「句型正好跨过两行」时算：任何一行单独就能命中的，交给那一行
+                if not (m_e or m_s):
+                    return
+                cut = row["split"] or 0
+                for part in (row["en"][:cut], row["en"][cut:]):
+                    pt = norm_tokens(part)
+                    if rx_e.search(" " + " ".join(pt) + " ") or rx_s.search(" " + " ".join(stem(t) for t in pt) + " "):
+                        return
             if need_order:
                 if exact and not m_e:
                     return
@@ -186,7 +204,7 @@ class Searcher:
             h = Hit(row["id"], row["media_id"], row["media_key"], row["show"], row["season"], row["episode"],
                     row["kind"], row["idx"], row["start"], row["end"], row["en"], row["zh"] or "",
                     row["speakers"], row["a_start"], row["a_end"], row["a_score"], bool(row["has_video"]),
-                    tier, s, matched)
+                    tier, s, matched, src or "sub")
             dk = (row["media_id"], " ".join(toks))           # 同集同句只留一条
             old = hits.get(dk)
             if old is None or (_tier_rank(h.tier), -h.score) < (_tier_rank(old.tier), -old.score):

@@ -108,19 +108,22 @@ def _faster_smoke(chk, smoke_wav=None):
 
 
 def _ui_test():
-    """真把主窗口开起来：建临时媒体库（1 集）→ 扫描 → 手动排队/取消 → 对齐中心 → 菜单齐全 → 窄窗口下面板还能缩。"""
-    import tempfile, subprocess
-    from PySide6.QtWidgets import QApplication, QDockWidget, QToolBar
-    from clipper import tools
-    from clipper.ui.main import MainWindow
+    """真把主窗口开起来：临时媒体库（1 集，字幕里有一句拆成两行）→ 扫描 → 手动排队/取消 → 对齐中心 →
+    菜单 / 顶栏 / 五个页面 → 搜索（含跨两行）→ 工作台（切点、I/O、吸附、试听）→ 片段链接 → 无损导出 → 最小宽度。"""
+    import tempfile, subprocess, time
+    from PySide6.QtWidgets import QApplication, QToolBar
+    from clipper import tools, export
+    from clipper.ui.main import MainWindow, P_WORK, P_SEARCH
     app = QApplication.instance() or QApplication([])
     root = tempfile.mkdtemp(prefix="clipper-ui-")
     d = os.path.join(root, "Test Show", "S01"); os.makedirs(d)
-    subprocess.run([tools.ffmpeg(), "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=3", "-f", "lavfi",
-                    "-i", "anullsrc=r=48000:cl=mono", "-t", "3", "-shortest", "-c:v", "libx264", "-c:a", "aac",
-                    os.path.join(d, "S01E01.mp4")], check=True)
+    vid = os.path.join(d, "S01E01.mp4")
+    subprocess.run([tools.ffmpeg(), "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=6", "-f", "lavfi",
+                    "-i", "sine=f=300:d=6", "-shortest", "-c:v", "libx264", "-g", "12", "-c:a", "aac", vid], check=True)
     with open(os.path.join(d, "S01E01.srt"), "w", encoding="utf-8") as fh:
-        fh.write("1\n00:00:00,500 --> 00:00:02,000\nWhose turn is it?\n轮到谁了？\n")
+        fh.write("1\n00:00:00,500 --> 00:00:02,000\nWhose turn is it?\n轮到谁了？\n\n"
+                 "2\n00:00:02,200 --> 00:00:03,000\nI don't know what\n我不知道\n\n"
+                 "3\n00:00:03,100 --> 00:00:04,500\nyou are doing here.\n你在这干嘛\n")
     w = MainWindow(autostart=False)
     w.resize(1000, 650); w.show(); app.processEvents()
     w.open_library(root)
@@ -129,31 +132,76 @@ def _ui_test():
     assert keys, "临时库没扫出集"
     assert not w.lib_settings()["auto_align"], "默认应是手动对齐"
     started = []
+    real_start = w.start_align
     w.start_align = lambda force=False: started.append(force)
     n = w.queue_keys(keys)
     st = w.lib.db.execute("SELECT align_status FROM media").fetchone()[0]
     assert n == 1 and st == "queued" and started == [True], f"手动排队失败 n={n} st={st} started={started}"
     w.cancel_queue()
     assert w.lib.db.execute("SELECT align_status FROM media").fetchone()[0] == "none", "取消排队失败"
+    w.start_align = real_start
     w.open_align_center(); app.processEvents(); w.align_center.close()
     menus = [a.text() for a in w.menuBar().actions()]
     need = ["文件", "搜索", "片段", "采集包", "对齐", "窗口", "帮助"]
     assert all(m in menus for m in need), f"菜单缺：{menus}"
     tb = w.findChild(QToolBar, "toolbar_main")
-    assert tb and len(tb.actions()) >= 15, "工具栏缺"
-    assert w.upd_btn.isVisible() and w.upd_btn.text() == "检查更新", "工具栏没有一键更新按钮"
+    assert tb and len(tb.actions()) >= 10 and len(w.nav) == 5, "顶栏缺"
+    assert w.upd_btn.isVisible() and w.upd_btn.text() == "检查更新", "顶栏没有一键更新按钮"
     w._mark_update({"version": "99.0.0", "url": "https://example.invalid/x.zip", "size": 1})
     assert w.upd_btn.text() == "更新到 99.0.0" and w.upd_btn.property("hot") == "true", "更新按钮没点亮"
     w._mark_update(None)
-    assert "glass" in app.styleSheet() and w.d_lib.titleBarWidget() is not None, "主题没生效"
-    docks = [x for x in w.findChildren(QDockWidget) if x.isVisible()]
-    mins = {x.windowTitle(): x.minimumSizeHint().width() for x in docks}
-    cen = w.centralWidget().minimumSizeHint().width()
+    assert "batchbar" in app.styleSheet(), "主题没生效"
+    assert w.eps.topLevelItemCount() == 1, "媒体库页没列出集"
+    # 搜索：普通 + 跨两行
+    w.q.setText("whose turn"); w.do_search(); app.processEvents()
+    assert w.stack.currentIndex() == P_SEARCH and w.hits and w.rows, "搜索没出结果"
+    w.c_order.setChecked(True)
+    w.q.setText("know what you are doing"); w.do_search(); app.processEvents()
+    assert any(h.src == "join" for h in w.hits), f"跨两行的句子没搜到：{[(h.en, h.src) for h in w.hits]}"
+    w.c_order.setChecked(False)
+    # 工作台
+    h = w.hits[0]
+    w.open_workspace(h, autoplay=False); app.processEvents()
+    assert w.stack.currentIndex() == P_WORK and w.script.count() == 3, f"台词本 {w.script.count()} 句"
+    for _ in range(100):
+        app.processEvents()
+        if w.wave.samples is not None:
+            break
+        time.sleep(0.05)
+    assert w.wave.samples is not None and len(w.wave.samples) > 1000, "波形采样没加载"
+    s0, e0 = w.cur_span
+    w.wave.snap = {"silence", "zero"}
+    t = w.wave._snap(s0 + 0.01, False)
+    assert abs(t - s0) < 0.2, f"吸附跑太远：{s0} -> {t}"
+    w.wave.zoom(0.5); w.wave.fit_selection()
+    w.player.setPosition(int((s0 + 0.2) * 1000)); app.processEvents()
+    w._cut_changed(s0 + 0.2, e0)
+    assert abs(w.cur_span[0] - (s0 + 0.2)) < 1e-6, "改切点失败"
+    w.save_cut()
+    row = w._cue_row(w.cur)
+    assert w.lib.final_span(row, w.cur.media_key)[2] == "manual", "微调没保存"
+    w.reset_cut()
+    from PySide6.QtCore import Qt as _Qt
+    i0, i1 = w.script.item(0).data(_Qt.UserRole), w.script.item(1).data(_Qt.UserRole)
+    w.pick_cue(i0); first = w.cur.idx
+    e_first = w.cur_span[1]
+    w.pick_cue(i1, extend=True)
+    assert w.cur.idx == first == i0 and w.cur_span[1] > e_first + 0.3, "Shift 加选没把选区扩到下一句"
+    w.audition_in(); w.audition_out(); w.player.stop()
+    # 片段链接
+    link = w.link_of(w.cur)
+    w.q.setText(link); w.do_search(); app.processEvents()
+    assert w.stack.currentIndex() == P_WORK and w.cur.idx == first, "片段链接打不开"
+    # 无损导出
+    out = os.path.join(root, "x.mp4")
+    export.export_lossless(vid, 1.0, 2.5, __import__("pathlib").Path(out))
+    assert os.path.getsize(out) > 1000, "无损导出失败"
+    for i in range(5):
+        w.goto(i); app.processEvents()
     mw = w.minimumSizeHint().width()
-    assert mw <= 900, f"主窗口最小宽度 {mw}px 太大（中间 {cen}，面板 {mins}），面板会拖不动"
-    w.lib.db.close() if False else None
+    assert mw <= 1000, f"主窗口最小宽度 {mw}px 太大"
     w.close(); app.processEvents()
-    return f"菜单 {len(menus)} 个、工具栏 {len(tb.actions())} 项；全开时窗口最小宽 {mw}px（中间 {cen}，面板 {mins}）"
+    return f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、5 个页面；搜索/跨两行/工作台/链接/无损导出都过；最小宽 {mw}px"
 
 
 def selftest(out, smoke_wav=None):
@@ -195,7 +243,7 @@ def selftest(out, smoke_wav=None):
         import clipper.ui.aligncenter  # noqa
         return "ok"
     chk("qt+multimedia+ui", qt)
-    chk("界面：菜单/工具栏/手动对齐/面板缩放", _ui_test)
+    chk("界面：顶栏/页面/搜索/工作台/链接/无损导出", _ui_test)
     def mp_lock():
         lk = multiprocessing.RLock()   # 会拉起 resource_tracker 子进程；没处理好就会重开整个程序
         with lk:

@@ -175,7 +175,7 @@ class WaveWorker(QThread):
 
     def run(self):
         try:
-            p = wave.peaks(self.video, self.t0, self.t1)
+            p = wave.samples(self.video, max(0.0, self.t0), self.t1)
         except Exception:
             p = None
         self.done.emit(self.token, p)
