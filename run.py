@@ -218,7 +218,15 @@ def selftest(out, smoke_wav=None):
 
     def upd():
         from clipper import updater
-        r = updater.check()
+        try:
+            r = updater.check()
+        except Exception as ex:  # noqa  CI 共享出口 IP 常被 GitHub 限流：证书/网络是通的，只记 DEGRADED
+            if "rate limit" in str(ex).lower() or "429" in str(ex):
+                t = updater.current_target()
+                if paths.frozen() and t is None:
+                    raise RuntimeError("打包版却找不到要替换的 exe/.app")
+                return f"DEGRADED GitHub 限流（{ex}），证书和网络已通；替换目标 {t}"
+            raise
         if not r["version"]:
             raise RuntimeError(f"没读到版本：{r}")
         t = updater.current_target()
