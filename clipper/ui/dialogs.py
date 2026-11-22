@@ -79,6 +79,14 @@ class SettingsDialog(QDialog):
         fa.addRow(QLabel("模型越大越准越慢。先用 small，实测后再调。"))
         self.mirror = QCheckBox("模型下载走国内镜像 hf-mirror.com"); self.mirror.setChecked(settings.get("hf_mirror", True))
         fa.addRow(self.mirror)
+        self.limit = QComboBox()
+        for pct in (50, 60, 70, 80, 90, 100):
+            self.limit.addItem(f"{pct}%" + ("（不限）" if pct == 100 else ""), pct)
+        i = self.limit.findData(int(settings.get("align_limit", 80) or 80))
+        self.limit.setCurrentIndex(i if i >= 0 else 3)
+        fa.addRow("对齐性能上限", self.limit)
+        fa.addRow(QLabel("限制对齐时占用的 GPU/CPU，机器不那么烫，代价是对齐变慢（例如 50% 约慢一倍）。\n"
+                         "只对这台电脑生效；对齐中途改也会马上生效。"))
         tabs.addTab(a, "对齐")
         # ---- 字幕样式 ----
         s = QWidget(); hs = QHBoxLayout(s)
@@ -141,7 +149,7 @@ class SettingsDialog(QDialog):
         return dict(ffmpeg=self.ffmpeg.text().strip(), export_dir=self.export_dir.text().strip(),
                     pad_pre=self.pre.value(), pad_post=self.post.value(), auto_align=self.auto_align.isChecked(),
                     align_engine=self.engine.currentData(), align_model=self.model.currentText(),
-                    hf_mirror=self.mirror.isChecked())
+                    hf_mirror=self.mirror.isChecked(), align_limit=self.limit.currentData())
 
     def style(self) -> Style:
         return Style(font=self.font.currentText(), en_size=self.en_size.value(), zh_size=self.zh_size.value(),

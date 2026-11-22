@@ -28,7 +28,7 @@ from ..library import Library, JOIN_BASE, AUTO_BASE
 from ..search import Searcher, Hit, TIER_ORIG, TIER_NEAR, TIER_FUNC
 from ..export import Style
 from .widgets import (WaveformView, DialogueMap, GroupHeader, ResultRow, fmt_ms, fmt_short, highlight_html,
-                      TIMING_TEXT, FlowLayout, tag, MONO)
+                      TIMING_TEXT, FlowLayout, tag, MONO, TagDelegate)
 from .workers import ScanWorker, AlignWorker, ExportWorker, WaveWorker, UpdateCheck, UpdateDownload
 from .dialogs import SettingsDialog, ExportDialog
 from . import theme
@@ -301,11 +301,15 @@ class MainWindow(QMainWindow):
         self.eps.setHeaderLabels(["集", "文件", "台词", "状态"])
         self.eps.setRootIsDecorated(False); self.eps.setAlternatingRowColors(False)
         h = self.eps.header(); h.setStretchLastSection(False)
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        # 1.0.8：列宽固定 / 拉伸，不再 ResizeToContents（上千行时每加一行都要重算）
+        h.setSectionResizeMode(0, QHeaderView.Interactive)
         h.setSectionResizeMode(1, QHeaderView.Stretch)
-        h.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(2, QHeaderView.Interactive)
         h.setSectionResizeMode(3, QHeaderView.Fixed)
-        self.eps.setColumnWidth(3, 170)
+        self.eps.setColumnWidth(0, 200); self.eps.setColumnWidth(2, 110); self.eps.setColumnWidth(3, 170)
+        self.eps.setUniformRowHeights(True)
+        self.eps.setItemDelegateForColumn(3, TagDelegate(self.eps))
+        self._ep_items = {}
         self.eps.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.eps.itemDoubleClicked.connect(lambda it, _c: self.open_episode(it.data(0, Qt.UserRole)))
         self.eps.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -876,35 +880,82 @@ class MainWindow(QMainWindow):
             self.banner.hide()
         self.refresh_episodes()
 
+    @staticmethod
+    def _ep_tags(r):
+        tags = [("字幕", "#64748B", False) if r["rel_sub"] else ("无字幕", "#E11D48", False)]
+        if not r["rel_video"]:
+            tags.append(("无视频", "#E11D48", False))
+        st = r["align_status"]
+        if r["sub_changed"]:
+            tags.append(("已变更", "#F59E0B", True))
+        elif st == "done":
+            tags.append(("已对齐", "#10B981", False))
+        elif st in ("queued", "running"):
+            tags.append(("对齐中" if st == "running" else "排队", "#7C3AED", False))
+        elif st == "error":
+            tags.append(("对齐失败", "#E11D48", False))
+        return tags
+
     def refresh_episodes(self):
+        self.eps.setUpdatesEnabled(False)
         self.eps.clear()
+        self._ep_items = {}
         if not self.lib:
+            self.eps.setUpdatesEnabled(True)
             return
+        from .widgets import TAGS_ROLE
         rows = self.lib.episodes(self.lib_show or None)
-        for r in rows[:3000]:
+        items = []
+        for r in rows[:5000]:
             ep = f"S{r['season']:02d}E{r['episode']:02d}" if r["kind"] == "tv" else "电影"
             name = Path(r["rel_video"] or r["rel_sub"] or r["key"]).name
             lines = f"{r['n_cues']} 条" + (f" +{r['n_auto']} 识别" if r["n_auto"] else "")
             it = QTreeWidgetItem([ep if self.lib_show else f"{r['show']}  {ep}", name, lines, ""])
             it.setData(0, Qt.UserRole, r["key"])
             it.setToolTip(1, r["rel_video"] or "（没有视频）")
-            self.eps.addTopLevelItem(it)
-            box = QWidget(); hb = QHBoxLayout(box); hb.setContentsMargins(0, 0, 6, 0); hb.setSpacing(4)
-            hb.addWidget(tag("字幕" if r["rel_sub"] else "无字幕", "#64748B" if r["rel_sub"] else "#E11D48"))
-            if not r["rel_video"]:
-                hb.addWidget(tag("无视频", "#E11D48"))
-            st = r["align_status"]
-            if r["sub_changed"]:
-                hb.addWidget(tag("已变更", "#F59E0B", True))
-            elif st == "done":
-                hb.addWidget(tag("已对齐", "#10B981"))
-            elif st in ("queued", "running"):
-                hb.addWidget(tag("对齐中" if st == "running" else "排队", "#7C3AED"))
-            elif st == "error":
-                hb.addWidget(tag("对齐失败", "#E11D48"))
-            hb.addStretch(1)
-            self.eps.setItemWidget(it, 3, box)
+            it.setData(3, TAGS_ROLE, self._ep_tags(r))
+            items.append(it)
+            self._ep_items[r["key"]] = it
+        self.eps.addTopLevelItems(items)
         self._filter_eps(self.ep_filter.text())
+        self.eps.setUpdatesEnabled(True)
+
+    def update_episode_row(self, key):
+        """只改一行（对齐状态变了），不重建整张表。"""
+        it = self._ep_items.get(key)
+        if it is None or not self.lib:
+            return
+        from .widgets import TAGS_ROLE
+        r = self.lib.db.execute(
+            "SELECT m.*, (SELECT COUNT(*) FROM cues c WHERE c.media_id=m.id AND c.src='sub') n_cues, "
+            "(SELECT COUNT(*) FROM cues c WHERE c.media_id=m.id AND c.src='auto') n_auto FROM media m WHERE key=?",
+            (key,)).fetchone()
+        if not r:
+            return
+        it.setText(2, f"{r['n_cues']} 条" + (f" +{r['n_auto']} 识别" if r["n_auto"] else ""))
+        it.setData(3, TAGS_ROLE, self._ep_tags(r))
+
+    def refresh_counts(self):
+        """对齐一集后：只更新左栏作品计数、对齐卡数字和黄条，不动集列表。"""
+        if not self.lib:
+            return
+        cnt = {r["show"]: r for r in self.lib.shows()}
+        for i in range(1, self.tree.topLevelItemCount()):
+            t = self.tree.topLevelItem(i)
+            r = cnt.get(t.data(0, Qt.UserRole))
+            if r:
+                t.setText(1, f"{r['aligned'] or 0}/{r['has_video'] or 0}")
+        show = self.lib_show
+        where, args = ("WHERE show=?", (show,)) if show else ("", ())
+        n, nv, na, nq = self.lib.db.execute(
+            f"SELECT COUNT(*), SUM(rel_video IS NOT NULL), SUM(align_status='done'), "
+            f"SUM(align_status IN ('queued','running')) FROM media {where}", args).fetchone()
+        self.al_sum.setText(f"{na or 0} / {nv or 0} 集已对齐（有视频的）" + (f"，{nq} 集排队中" if nq else "")
+                            + "。对齐后切点精确到词，并能补出字幕里漏掉的台词。")
+        ch = self.lib.changed_keys()
+        if ch:
+            self.banner_lb.setText(f"<b>{len(ch)} 集换过字幕或视频</b>，之前的对齐对不上了（搜索已按新字幕重建）。")
+        self.banner.setVisible(bool(ch))
 
     def _filter_eps(self, text):
         t = text.strip().lower()
@@ -956,7 +1007,15 @@ class MainWindow(QMainWindow):
     def lib_settings(self):
         g = self.lib.get_setting
         return dict(align_model=g("align_model", "small"), align_engine=g("align_engine", ""),
-                    hf_mirror=g("hf_mirror", True), auto_align=bool(g("auto_align", False)))
+                    hf_mirror=g("hf_mirror", True), auto_align=bool(g("auto_align", False)),
+                    # 性能上限只跟这台电脑有关（Win / Mac 共用一个媒体库），存在本机设置里
+                    align_limit=int(self.qs.value("align_limit", 80) or 80),
+                    align_isolate=str(self.qs.value("align_isolate", "true")).lower() != "false")
+
+    def set_align_limit(self, pct: int):
+        self.qs.setValue("align_limit", int(pct))
+        if self.align_worker:
+            self.align_worker.settings = self.lib_settings()
 
     def start_align(self, force=False):
         if not self.lib:
@@ -1067,13 +1126,17 @@ class MainWindow(QMainWindow):
         self.align_center.show(); self.align_center.raise_(); self.align_center.activateWindow()
 
     def _align_status(self, key, f, text, done, todo):
+        if key != getattr(self, "_al_key", None):
+            self._al_key = key
+            self.update_episode_row(key)
         self.al_lb.setText(f"正在对齐：{key}　{text}　（已完成 {done} 集，还剩 {todo} 集）")
         self.al_bar.setValue(int(f * 1000))
 
     def _align_done(self, key, msg):
         self.al_log.show()
         self.al_log.insertItem(0, f"{time.strftime('%H:%M')}  {key}  {msg}")
-        self.refresh_tree()
+        self.update_episode_row(key)
+        self.refresh_counts()
         if self.cur and self.cur.media_key == key:
             self.ws_media = None
             self.refresh_current()
@@ -1081,7 +1144,7 @@ class MainWindow(QMainWindow):
     def _align_idle(self):
         n = self.lib.db.execute("SELECT COUNT(*) FROM media WHERE align_status='done'").fetchone()[0] if self.lib else 0
         self.al_lb.setText(f"对齐：队列里的都跑完了（共 {n} 集已对齐）")
-        self.refresh_lib_page()
+        self.refresh_counts()
 
     def _toggle_align(self):
         if not self.align_worker:
@@ -1717,6 +1780,7 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             s = dlg.settings()
             self.qs.setValue("ffmpeg", s.pop("ffmpeg"))
+            self.qs.setValue("align_limit", int(s.pop("align_limit", 80)))
             tools.set_paths(self.qs.value("ffmpeg") or None)
             for k, v in s.items():
                 self.lib.set_setting(k, v)

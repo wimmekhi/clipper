@@ -230,6 +230,22 @@ def selftest(out, smoke_wav=None):
     chk("ffmpeg+libass", lambda: tools.check() or "libass ok")
     chk("fonts", lambda: sorted(os.listdir(paths.fonts_dir())))
     chk("faster_whisper", lambda: __import__("faster_whisper").__version__)
+    def child_ping():
+        from clipper import align
+        _d, pid = align.transcribe_isolated("--ping")
+        if not pid or pid == os.getpid():
+            raise RuntimeError(f"子进程 pid 不对：{pid}")
+        return f"识别子进程能起（pid {pid}）"
+    chk("识别子进程", child_ping)
+    def throttle():
+        from clipper import align
+        import time as _t
+        th = align.Throttle(0.5); th.mark = _t.time() - 0.2; t0 = _t.time(); th()
+        nap = _t.time() - t0
+        if not 0.15 < nap < 0.5:
+            raise RuntimeError(f"50% 上限应歇约 0.2s，实际 {nap:.2f}s")
+        return f"50% 上限歇 {nap:.2f}s"
+    chk("性能上限", throttle)
     chk("ctranslate2", lambda: __import__("ctranslate2").__version__)
     chk("onnxruntime", lambda: __import__("onnxruntime").__version__)
     chk("sqlite fts5", lambda: __import__("sqlite3").connect(":memory:").execute(

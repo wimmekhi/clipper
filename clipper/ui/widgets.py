@@ -9,7 +9,7 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QRect, QPoint, QSize
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath, QBrush
 from PySide6.QtWidgets import (QLayout, QWidget, QLabel, QHBoxLayout, QVBoxLayout, QPushButton, QFrame,
-                               QSizePolicy)
+                               QSizePolicy, QStyledItemDelegate)
 
 from .theme import ACCENT, TIER_COLOR, TIMING_TEXT, CORAL, TEXT, TEXT2, ACCENT_D
 
@@ -844,3 +844,36 @@ class ResultRow(QFrame):
 
     def mouseDoubleClickEvent(self, e):
         self.double.emit(self.hit)
+
+
+TAGS_ROLE = Qt.UserRole + 7
+
+
+class TagDelegate(QStyledItemDelegate):
+    """列表里的状态小胶囊直接画出来（1.0.8：以前每行塞 QWidget，上千集时刷新要几十秒）。
+    数据放在 TAGS_ROLE：[(文字, 颜色, 实心), …]"""
+
+    def paint(self, p, opt, idx):
+        super().paint(p, opt, idx)
+        tags = idx.data(TAGS_ROLE) or []
+        if not tags:
+            return
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing)
+        f = QFont(opt.font); f.setPixelSize(11); f.setBold(True); p.setFont(f)
+        fm = p.fontMetrics()
+        x = opt.rect.left() + 2
+        h = fm.height() + 2
+        y = opt.rect.top() + (opt.rect.height() - h) / 2
+        for text, color, solid in tags:
+            w = fm.horizontalAdvance(text) + 16
+            if x + w > opt.rect.right():
+                break
+            c = QColor(color)
+            bg = QColor(c); bg.setAlphaF(0.95 if solid else 0.12)
+            p.setPen(Qt.NoPen); p.setBrush(bg)
+            p.drawRoundedRect(QRectF(x, y, w, h), h / 2, h / 2)
+            p.setPen(QColor("#FFFFFF") if solid else c)
+            p.drawText(QRectF(x, y, w, h), Qt.AlignCenter, text)
+            x += w + 4
+        p.restore()

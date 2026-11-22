@@ -65,6 +65,12 @@ class AlignCenter(QDialog):
         self.engine.addItem("mlx-whisper（GPU）", "mlx")
         top.addWidget(self.engine)
         self.mirror = QCheckBox("模型走国内镜像"); top.addWidget(self.mirror)
+        top.addWidget(QLabel("性能上限"))
+        self.limit = QComboBox()
+        for pct in (50, 60, 70, 80, 90, 100):
+            self.limit.addItem(f"{pct}%" + ("（不限）" if pct == 100 else ""), pct)
+        self.limit.setToolTip("限制对齐占用的 GPU/CPU，机器不那么烫，对齐会变慢；中途改马上生效")
+        top.addWidget(self.limit)
         v.addLayout(top)
 
         # 当前进度
@@ -120,8 +126,8 @@ class AlignCenter(QDialog):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Interactive); hh.resizeSection(0, 260)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.Interactive); hh.resizeSection(1, 110)
+        hh.setSectionResizeMode(2, QHeaderView.Interactive); hh.resizeSection(2, 90)
         hh.setSectionResizeMode(3, QHeaderView.Stretch)
         split.addWidget(self.table)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(3000)
@@ -135,6 +141,7 @@ class AlignCenter(QDialog):
         self.model.currentIndexChanged.connect(self.save_settings)
         self.engine.currentIndexChanged.connect(self.save_settings)
         self.mirror.toggled.connect(self.save_settings)
+        self.limit.currentIndexChanged.connect(lambda _i: self.main.set_align_limit(self.limit.currentData()))
         self.fill_shows()
         self.reload()
         self.probe()
@@ -146,6 +153,8 @@ class AlignCenter(QDialog):
         i = self.model.findText(s["align_model"]); self.model.setCurrentIndex(max(0, i))
         i = self.engine.findData(s["align_engine"] or ""); self.engine.setCurrentIndex(max(0, i))
         self.mirror.setChecked(bool(s["hf_mirror"]))
+        i = self.limit.findData(int(s.get("align_limit", 80)))
+        self.limit.setCurrentIndex(i if i >= 0 else 3)
 
     def save_settings(self):
         lib = self.main.lib
@@ -185,6 +194,7 @@ class AlignCenter(QDialog):
         rows = db.execute(f"SELECT key,show,season,episode,kind,title,align_status,align_msg FROM media "
                           f"WHERE {' AND '.join(where)} ORDER BY show,season,episode,key", args).fetchall()
         self.table.setUpdatesEnabled(False)
+        self._rows = {}
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             ep = f"S{r['season']:02d}E{r['episode']:02d}" if r["kind"] == "tv" else (r["title"] or "")
@@ -193,6 +203,7 @@ class AlignCenter(QDialog):
                 it = QTableWidgetItem(str(c))
                 if j == 0:
                     it.setData(Qt.UserRole, r["key"])
+                    self._rows[r["key"]] = i
                 if j == 2 and r["align_status"] in STATUS_COLOR:
                     it.setForeground(QColor(STATUS_COLOR[r["align_status"]]))
                 if j == 3:
@@ -289,6 +300,7 @@ class AlignCenter(QDialog):
             self.cur_lb.setProperty("key", key)
             self.append(f"▶ {key}")
             self.tick.start()
+            self.update_row(key)
         self.cur_lb.setText(f"正在对齐：{key}")
         self.step_lb.setText(text)
         self.bar.setValue(int(f * 1000))
@@ -303,11 +315,29 @@ class AlignCenter(QDialog):
             base = self.cur_lb.text().split("　")[0]
             self.cur_lb.setText(f"{base}　已用 {int(el // 60)}:{int(el % 60):02d}")
 
+    def update_row(self, key):
+        """只改这一集那一行（1.0.8：以前每集做完重建整张表，上千集时卡半分钟）。"""
+        i = getattr(self, "_rows", {}).get(key)
+        if i is None:
+            return
+        r = self.main.lib.db.execute("SELECT align_status,align_msg FROM media WHERE key=?", (key,)).fetchone()
+        if not r:
+            return
+        it = self.table.item(i, 2)
+        if it:
+            it.setText(STATUS_TEXT.get(r["align_status"], r["align_status"]))
+            if r["align_status"] in STATUS_COLOR:
+                it.setForeground(QColor(STATUS_COLOR[r["align_status"]]))
+        it = self.table.item(i, 3)
+        if it:
+            it.setText(r["align_msg"] or ""); it.setToolTip(r["align_msg"] or "")
+
     def on_done(self, key, msg):
         self.append(f"■ {key}  {msg}")
         self._t_start = None
         self._last_stage = ""
-        self.reload()
+        self.update_row(key)
+        self.update_counts()
 
     def on_idle(self):
         self.tick.stop()

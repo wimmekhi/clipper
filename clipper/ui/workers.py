@@ -114,12 +114,23 @@ class AlignWorker(QThread):
                 if now - last[0] >= 0.3 or f >= 1.0:
                     last[0] = now
                     self.status.emit(key, float(f), text, done, todo)
+            def control():
+                if self._stop.is_set():
+                    return "stop"
+                return "pause" if self._pause.is_set() else "resume"
             try:
                 d = align.align_media(
                     lib, row, model=self.settings.get("align_model", "small"),
                     engine=self.settings.get("align_engine") or None,
-                    mirror=self.settings.get("hf_mirror", True), progress=prog)
+                    mirror=self.settings.get("hf_mirror", True), progress=prog,
+                    limit_fn=lambda: int(self.settings.get("align_limit", 80) or 100) / 100.0,
+                    isolate=self.settings.get("align_isolate", True),
+                    control=control, paused=self._pause.is_set)
                 self.episode_done.emit(key, d["summary"])
+            except align.Cancelled:
+                lib.db.execute("UPDATE media SET align_status='queued', align_msg=NULL WHERE id=?", (row["id"],))
+                lib.db.commit()
+                break
             except Exception as ex:
                 align.log(f"失败 {key}：{ex!r}\n{traceback.format_exc()[-1500:]}")
                 lib.db.execute("UPDATE media SET align_status='error', align_msg=? WHERE id=?",

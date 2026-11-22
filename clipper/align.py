@@ -211,13 +211,65 @@ def transcribe_mlx(audio: np.ndarray, model: str, model_path: str | None = None,
     return words
 
 
+# ---------------- 性能上限（1.0.8） ----------------
+
+class Throttle:
+    """按占空比限速：干一段活就按比例歇一会儿。limit=0.6 → 每干 1 秒歇约 0.67 秒，平均占用约 60%。
+    GPU 没法直接限百分比，这是 mlx 和 CPU 都管用的办法；也用来响应暂停（pause 事件置位时停在这里等）。"""
+
+    def __init__(self, limit=1.0, pause=None):
+        self._lim = limit           # 数字，或返回数字的函数（运行中可改）
+        self.pause = pause          # 有 is_set() 的事件，或返回 bool 的函数
+        self.mark = time.time()
+        self.rested = 0.0
+
+    @property
+    def limit(self) -> float:
+        v = self._lim() if callable(self._lim) else self._lim
+        return min(1.0, max(0.3, float(v or 1.0)))
+
+    def __call__(self):
+        now = time.time()
+        if self.limit < 0.999:
+            worked = now - self.mark
+            nap = min(10.0, worked * (1.0 / self.limit - 1.0))
+            if nap > 0.01:
+                time.sleep(nap)
+                self.rested += nap
+        while self.pause is not None and (self.pause() if callable(self.pause) else self.pause.is_set()):
+            time.sleep(0.3)
+        self.mark = time.time()
+
+
+def cpu_threads(limit: float = 1.0) -> int:
+    n = os.cpu_count() or 4
+    if limit >= 0.999:
+        return max(1, n - 1)
+    return max(1, int(round(n * limit)))
+
+
+def lower_priority():
+    """识别子进程降低优先级：前台软件和系统更顺。"""
+    try:
+        if os.name == "nt":
+            import ctypes
+            BELOW_NORMAL = 0x00004000
+            ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), BELOW_NORMAL)
+        else:
+            os.nice(10)
+    except Exception:
+        pass
+
+
 def transcribe(audio: np.ndarray, model: str = "small", engine: str | None = None, mirror=True,
-               progress=None) -> list[dict]:
+               progress=None, limit=1.0, pause=None) -> list[dict]:
     """返回 [{w,start,end,p}]。Apple 芯片优先 mlx-whisper（GPU），出错自动退回 faster-whisper（CPU）。
     progress(frac, 文字)。"""
     global LAST_ENGINE
     _use_mirror(mirror)
     say = progress or (lambda f, t="": None)
+    thr = Throttle(limit, pause)
+    cap = ""
     engine = engine or default_engine()
     if engine == "mlx" and _MLX_BROKEN:
         engine = "faster"
@@ -230,8 +282,13 @@ def transcribe(audio: np.ndarray, model: str = "small", engine: str | None = Non
             LAST_ENGINE = f"mlx-whisper · {dev}"
             say(0.0, f"识别中（{LAST_ENGINE}）…")
             t0 = time.time()
-            words = transcribe_mlx(audio, model, path, lambda f: say(
-                f, f"识别 {f*100:.0f}%（{LAST_ENGINE}，已用 {time.time()-t0:.0f}s）"))
+            thr.mark = time.time()
+
+            def mprog(f):
+                cap = "" if thr.limit >= 0.999 else f"，上限 {thr.limit*100:.0f}%"
+                say(f, f"识别 {f*100:.0f}%（{LAST_ENGINE}{cap}，已用 {time.time()-t0:.0f}s）")
+                thr()
+            words = transcribe_mlx(audio, model, path, mprog)
             log(f"引擎 {LAST_ENGINE}")
             say(1.0, "识别完成")
             return words
@@ -244,15 +301,16 @@ def transcribe(audio: np.ndarray, model: str = "small", engine: str | None = Non
     LAST_ENGINE = "faster-whisper · CPU" + (f"（mlx 不可用：{_MLX_BROKEN[:60]}）" if _MLX_BROKEN and is_apple_silicon() else "")
     log(f"引擎 {LAST_ENGINE}")
     from faster_whisper import WhisperModel
-    key = (model,)
+    threads = cpu_threads(thr.limit)
+    key = (model, threads)
     if key not in _MODEL_CACHE:
         path = ensure_model("faster", model, mirror, lambda f, t: say(0.0, t))
         say(0.0, "加载模型…")
-        threads = max(1, (os.cpu_count() or 4) - 1)
         _MODEL_CACHE[key] = WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=threads)
     m = _MODEL_CACHE[key]
     say(0.0, f"识别中（{LAST_ENGINE}）…")
     t0 = time.time()
+    thr.mark = t0
     segs, _info = m.transcribe(audio, language="en", word_timestamps=True, vad_filter=True,
                                condition_on_previous_text=False, beam_size=1)
     for seg in segs:
@@ -261,9 +319,144 @@ def transcribe(audio: np.ndarray, model: str = "small", engine: str | None = Non
                               p=round(w.probability, 3)))
         if total:
             f = min(0.99, seg.end / total)
-            say(f, f"识别 {f*100:.0f}%（{LAST_ENGINE}，已用 {time.time()-t0:.0f}s）")
+            cap = "" if thr.limit >= 0.999 else f"，上限 {thr.limit*100:.0f}%"
+            say(f, f"识别 {f*100:.0f}%（{LAST_ENGINE}{cap}，已用 {time.time()-t0:.0f}s）")
+        thr()
     say(1.0, "识别完成")
     return words
+
+
+# ---------------- 识别放到子进程（1.0.8） ----------------
+# 识别是重活：放在界面同一个进程里会和界面抢 Python 的 GIL，对齐时整个窗口一顿一顿的。
+# 子进程里读音频 + 识别，只把进度和词表传回来；崩了也不会带走主程序。
+
+def _child_main(conn, video, model, engine, mirror, limit, log_file):
+    global LOG_FILE
+    lower_priority()
+    LOG_FILE = Path(log_file) if log_file else None
+    paused = [False]
+    cur_limit = [float(limit or 1.0)]
+
+    def poll():
+        try:
+            while conn.poll():
+                m = conn.recv()
+                if m == "pause":
+                    paused[0] = True
+                elif m == "resume":
+                    paused[0] = False
+                elif m == "stop":
+                    os._exit(3)
+                elif isinstance(m, tuple) and m[0] == "limit":
+                    cur_limit[0] = float(m[1])
+        except (EOFError, OSError):
+            os._exit(4)          # 主程序没了
+        return paused[0]
+
+    def say(f, t=""):
+        poll()
+        conn.send(("p", float(f), t))
+    try:
+        if video == "--ping":
+            conn.send(("ok", os.getpid(), "", None, 0.0))
+            return
+        say(0.01, "读取音频（ffmpeg 解码整集）…")
+        audio = load_audio(Path(video))
+        dur = len(audio) / SR
+        conn.send(("dur", dur))
+        if dur < 5:
+            raise RuntimeError(f"音频只有 {dur:.1f}s，视频可能坏了")
+        say(0.05, f"音频 {dur/60:.1f} 分钟，准备识别…")
+        words = transcribe(audio, model=model, engine=engine, mirror=mirror,
+                           progress=lambda f, t="": say(0.05 + 0.9 * f, t), limit=lambda: cur_limit[0],
+                           pause=poll)
+        conn.send(("ok", words, LAST_ENGINE, _MLX_BROKEN, dur))
+    except BaseException as ex:  # noqa
+        try:
+            conn.send(("err", f"{ex}", traceback.format_exc()[-1500:]))
+        except Exception:
+            pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+class Cancelled(Exception):
+    pass
+
+
+def transcribe_isolated(video: Path, model="small", engine=None, mirror=True, limit=1.0,
+                        progress=None, control=None, limit_fn=None):
+    """在子进程里读音频+识别。返回 (时长秒, 词表)。
+    control()：主线程问一下现在要干什么，返回 None / 'pause' / 'resume' / 'stop'。"""
+    global LAST_ENGINE, _MLX_BROKEN
+    import multiprocessing as mp
+    ctx = mp.get_context("spawn")
+    a, b = ctx.Pipe(duplex=True)
+    pr = ctx.Process(target=_child_main, name="clipper-align",
+                     args=(b, str(video), model, engine, mirror, limit, str(LOG_FILE) if LOG_FILE else ""),
+                     daemon=True)
+    pr.start()
+    b.close()
+    say = progress or (lambda f, t="": None)
+    dur, last_state, last_lim = 0.0, None, limit
+    try:
+        while True:
+            if limit_fn:
+                lv = limit_fn()
+                if lv != last_lim:
+                    last_lim = lv
+                    try:
+                        a.send(("limit", lv))
+                    except Exception:
+                        pass
+            if control:
+                c = control()
+                if c == "stop":
+                    try:
+                        a.send("stop")
+                    except Exception:
+                        pass
+                    raise Cancelled("已停止")
+                if c in ("pause", "resume") and c != last_state:
+                    last_state = c
+                    try:
+                        a.send(c)
+                    except Exception:
+                        pass
+            if not a.poll(0.2):
+                if not pr.is_alive() and not a.poll(0):
+                    raise RuntimeError(f"识别子进程意外退出（代码 {pr.exitcode}）")
+                continue
+            try:
+                m = a.recv()
+            except EOFError:
+                raise RuntimeError(f"识别子进程意外退出（代码 {pr.exitcode}）")
+            if m[0] == "p":
+                say(m[1], m[2])
+            elif m[0] == "dur":
+                dur = m[1]
+            elif m[0] == "ok":
+                _, words, eng, broken, d = m
+                LAST_ENGINE = eng or LAST_ENGINE
+                if broken:
+                    _MLX_BROKEN = broken
+                return (d or dur), words
+            elif m[0] == "err":
+                if "下载" in m[1] or "音频" in m[1] or "ffmpeg" in m[1]:
+                    raise RuntimeError(m[1])
+                raise RuntimeError(m[1] + "\n" + m[2])
+    finally:
+        try:
+            a.close()
+        except Exception:
+            pass
+        pr.join(5)
+        if pr.is_alive():
+            pr.terminate()
+            pr.join(3)
 
 
 # ---------------- 日志 ----------------
@@ -454,8 +647,9 @@ def _interpolate(cues, out):
         o["estimated"] = True
 
 
-def align_media(lib, media_row, model="small", engine=None, mirror=True, progress=None) -> dict:
-    """progress(总进度 0~1, 当前步骤文字)。"""
+def align_media(lib, media_row, model="small", engine=None, mirror=True, progress=None, **opts) -> dict:
+    """progress(总进度 0~1, 当前步骤文字)。
+    opts：limit 性能上限 0.3~1；isolate 识别放子进程（默认是）；control() 子进程暂停/停止；paused() 本进程模式暂停。"""
     global LOG_FILE
     LOG_FILE = lib.data / "align.log" if hasattr(lib, "data") else None
     say = progress or (lambda f, t="": None)
@@ -464,18 +658,36 @@ def align_media(lib, media_row, model="small", engine=None, mirror=True, progres
     if not video or not video.exists():
         raise FileNotFoundError(f"没有视频文件：{media_row['rel_video']}")
     t0 = time.time()
+    say_rec = say
     log(f"开始 {key}  视频 {media_row['rel_video']}  字幕 {media_row['rel_sub']}")
-    say(0.01, "读取音频（ffmpeg 解码整集）…")
-    try:
-        audio = load_audio(video)
-    except subprocess.CalledProcessError as ex:
-        raise RuntimeError("ffmpeg 读音频失败：" + (ex.stderr or b"").decode("utf-8", "ignore")[-300:]) from ex
-    dur = len(audio) / SR
-    if dur < 5:
-        raise RuntimeError(f"音频只有 {dur:.1f}s，视频可能坏了")
-    say(0.05, f"音频 {dur/60:.1f} 分钟，准备识别…")
-    words = transcribe(audio, model=model, engine=engine, mirror=mirror,
-                       progress=lambda f, t="": say(0.05 + 0.9 * f, t))
+    limit_fn = opts.get("limit_fn")
+    limit = float(limit_fn() if limit_fn else (opts.get("limit", 1.0) or 1.0))
+    words, dur = None, 0.0
+    if opts.get("isolate", True):
+        try:
+            dur, words = transcribe_isolated(video, model, engine, mirror, limit, say_rec, opts.get("control"),
+                                              limit_fn)
+        except Cancelled:
+            raise
+        except Exception as ex:  # noqa  子进程起不来/崩了：退回老办法，在本进程里跑
+            if "模型下载失败" in str(ex) or "ffmpeg" in str(ex) or "音频只有" in str(ex):
+                raise
+            log(f"识别子进程失败，改在主进程里跑：{ex!r}")
+            words = None
+    if words is None:
+        say(0.01, "读取音频（ffmpeg 解码整集）…")
+        try:
+            audio = load_audio(video)
+        except subprocess.CalledProcessError as ex:
+            raise RuntimeError("ffmpeg 读音频失败：" + (ex.stderr or b"").decode("utf-8", "ignore")[-300:]) from ex
+        dur = len(audio) / SR
+        if dur < 5:
+            raise RuntimeError(f"音频只有 {dur:.1f}s，视频可能坏了")
+        say(0.05, f"音频 {dur/60:.1f} 分钟，准备识别…")
+        words = transcribe(audio, model=model, engine=engine, mirror=mirror,
+                           progress=lambda f, t="": say(0.05 + 0.9 * f, t), limit=limit_fn or limit,
+                           pause=opts.get("paused"))
+        del audio
     say(0.96, f"匹配字幕（识别出 {len(words)} 个词）…")
     rows = lib.db.execute("SELECT idx,start,end,en FROM cues WHERE media_id=? AND COALESCE(src,'sub')='sub' ORDER BY idx",
                           (media_row["id"],)).fetchall()
