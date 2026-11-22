@@ -61,7 +61,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(g, "常规")
         # ---- 对齐 ----
         a = QWidget(); fa = QFormLayout(a)
-        self.auto_align = QCheckBox("视频入库后自动在后台对齐（默认关：在媒体库右键作品或对齐中心手动选集）")
+        self.auto_align = QCheckBox("新视频入库后自动排队对齐（默认关；打开软件不会自动开跑，旧集在媒体库右键或对齐中心手动选）")
         self.auto_align.setChecked(bool(settings.get("auto_align", False)))
         fa.addRow(self.auto_align)
         self.engine = QComboBox()

@@ -815,7 +815,14 @@ class MainWindow(QMainWindow):
     def _scan_done(self, st):
         self.al_lb.setText(f"扫描完成：共 {st['total']} 集，新增 {st['new']}，更新 {st['updated']}，移除 {st['removed']}")
         self.refresh_tree()
-        self.start_align()
+        # 1.0.9：启动/重扫不再自动开跑。只有开了「入库后自动对齐」且这次扫到新视频，才把这些新集排队。
+        new_keys = st.get("new_keys") or []
+        if new_keys and self.lib_settings()["auto_align"]:
+            self.queue_keys(new_keys)
+            return
+        n_q = self.lib.db.execute("SELECT COUNT(*) FROM media WHERE align_status IN ('queued','running')").fetchone()[0]
+        if n_q:
+            self.al_lb.setText(self.al_lb.text() + f"　上次还有 {n_q} 集在排队，到对齐中心点「开始」继续")
 
     def refresh_tree(self):
         if not self.lib:
@@ -1096,8 +1103,6 @@ class MainWindow(QMainWindow):
         self.lib.set_setting("auto_align", bool(on))
         if self.align_worker:
             self.align_worker.settings = self.lib_settings(); self.align_worker.kick()
-        if on:
-            self.start_align()
 
     def _tree_menu(self, pos):
         it = self.tree.itemAt(pos)
@@ -1791,7 +1796,6 @@ class MainWindow(QMainWindow):
             self.acts["auto"].blockSignals(False)
             if self.align_worker:
                 self.align_worker.settings = self.lib_settings()
-            self.start_align()
             if self.cur:
                 self.refresh_current()
 

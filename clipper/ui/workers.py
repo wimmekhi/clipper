@@ -80,7 +80,7 @@ class AlignWorker(QThread):
     def _run(self):
         lib = Library(self.root)
         align.LOG_FILE = lib.data / "align.log"
-        lib.db.execute("UPDATE media SET align_status='none' WHERE align_status='running'")
+        lib.db.execute("UPDATE media SET align_status='queued' WHERE align_status='running'")
         lib.db.commit()
         align.log(f"对齐线程启动，媒体库 {self.root}，设置 {self.settings}")
         while not self._stop.is_set():
@@ -89,7 +89,7 @@ class AlignWorker(QThread):
                 self._kick.clear()
                 continue
             # 手动模式（默认）只跑排了队的集；自动模式才把所有未对齐的都跑掉
-            sts = "('none','queued')" if self.settings.get("auto_align") else "('queued')"
+            sts = "('queued')"   # 1.0.9：只跑排了队的；「自动对齐」改为入库时把新集排队
             row = lib.db.execute(
                 f"SELECT * FROM media WHERE align_status IN {sts} AND rel_video IS NOT NULL "
                 "AND rel_sub IS NOT NULL ORDER BY (align_status='queued') DESC, show, season, episode LIMIT 1"

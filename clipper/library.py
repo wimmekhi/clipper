@@ -264,7 +264,7 @@ class Library:
         if int(self.get_setting("index_ver", 1) or 1) < INDEX_VER:
             self.reindex_all(progress)
         found = self.discover()
-        stats = dict(new=0, updated=0, removed=0, total=len(found))
+        stats = dict(new=0, updated=0, removed=0, total=len(found), new_keys=[])
         existing = {r["key"]: r for r in self.db.execute("SELECT * FROM media")}
         for n, (key, it) in enumerate(sorted(found.items())):
             if progress:
@@ -283,6 +283,7 @@ class Library:
                      rel(vid), rel(sub), rel(zh), "", vid_sig))
                 mid = cur.lastrowid
                 stats["new"] += 1
+                stats["new_keys"].append(key)
             else:
                 mid = row["id"]
                 if row["video_sig"] != vid_sig and vid:
