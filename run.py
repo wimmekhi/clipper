@@ -276,6 +276,16 @@ def selftest(out, smoke_wav=None):
         tqdm.tqdm(total=1, disable=False, file=open(os.devnull, "w")).close()
         return "ok"
     chk("multiprocessing lock", mp_lock)
+    def cuda_panel():
+        from clipper import gpu
+        r = gpu.selftest()
+        if gpu.is_windows():
+            from PySide6.QtWidgets import QApplication
+            QApplication.instance() or QApplication([])
+            from clipper.ui.cudapanel import CudaPanel
+            CudaPanel().refresh()
+        return r
+    chk("显卡加速（CUDA 运行库）", cuda_panel)
     _mlx_checks(chk, smoke_wav)
     if os.environ.get("CLIPPER_SMOKE") or smoke_wav:
         _faster_smoke(chk, smoke_wav)

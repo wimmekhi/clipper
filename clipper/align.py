@@ -2,7 +2,8 @@
 
 - 每集只跑一次，结果写到 媒体库/.clipper/align/<集>.json（在移动硬盘上，换电脑直接用）。
 - 字幕时间只当「大概在哪」的锚点；偏移会随集内漂移，用最近若干条的偏移中位数动态跟踪。
-- 引擎：Mac(Apple 芯片) 优先 mlx-whisper（Metal GPU，打包版已内置）；不可用或出错自动退回 faster-whisper（CPU）。
+- 引擎：Mac(Apple 芯片) 优先 mlx-whisper（Metal GPU，打包版已内置）；Windows 有 N 卡且下好 CUDA 运行库走
+  faster-whisper CUDA（1.1.0）；不可用或出错自动退回 faster-whisper（CPU）。
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ import numpy as np
 
 from .search import norm_tokens
 from . import tools
+from . import gpu
 
 SR = 16000
 
@@ -43,6 +45,9 @@ def is_apple_silicon() -> bool:
 
 
 def default_engine() -> str:
+    """'mlx'（Apple 芯片）、'auto_win'（Windows：有 N 卡且运行库就绪走 CUDA，否则 CPU）或 'faster'。"""
+    if gpu.is_windows():
+        return "auto_win"
     if is_apple_silicon() and not _MLX_BROKEN:
         try:
             import mlx_whisper  # noqa: F401
@@ -270,9 +275,11 @@ def transcribe(audio: np.ndarray, model: str = "small", engine: str | None = Non
     say = progress or (lambda f, t="": None)
     thr = Throttle(limit, pause)
     cap = ""
+    if engine == "cuda" and not gpu.is_windows():
+        engine = None            # 媒体库设置 Win/Mac 共用：Mac 上选了 cuda 就按自动走
     engine = engine or default_engine()
-    if engine == "mlx" and _MLX_BROKEN:
-        engine = "faster"
+    if engine == "mlx" and (_MLX_BROKEN or not is_apple_silicon()):
+        engine = "auto_win" if gpu.is_windows() else "faster"
     total = len(audio) / SR
     words: list[dict] = []
     if engine == "mlx":
@@ -298,15 +305,49 @@ def transcribe(audio: np.ndarray, model: str = "small", engine: str | None = Non
             _mark_mlx_broken(f"运行失败 {ex!r}")
             log("mlx 失败，退回 CPU：" + traceback.format_exc())
             words = []
-    LAST_ENGINE = "faster-whisper · CPU" + (f"（mlx 不可用：{_MLX_BROKEN[:60]}）" if _MLX_BROKEN and is_apple_silicon() else "")
-    log(f"引擎 {LAST_ENGINE}")
+    # Windows N 卡：auto 或手动选 cuda 时走显卡；出错退回 CPU 从头识别
+    want_cuda = engine == "cuda" or (engine == "auto_win" and gpu.usable())
+    if want_cuda and gpu.is_windows() and not gpu._BROKEN:
+        try:
+            return _transcribe_faster(audio, model, mirror, say, thr, total, device="cuda")
+        except Exception as ex:  # noqa
+            if "模型下载失败" in str(ex):
+                raise
+            gpu.mark_broken(f"{ex!r}")
+            log("CUDA 失败，退回 CPU：" + traceback.format_exc())
+            say(0.0, "显卡出错，改用 CPU 从头识别…")
+    return _transcribe_faster(audio, model, mirror, say, thr, total, device="cpu")
+
+
+def _transcribe_faster(audio, model, mirror, say, thr, total, device="cpu") -> list[dict]:
+    global LAST_ENGINE
     from faster_whisper import WhisperModel
-    threads = cpu_threads(thr.limit)
-    key = (model, threads)
+    words: list[dict] = []
+    if device == "cuda":
+        gpu.prepare()
+        if gpu.cuda_device_count() < 1:
+            raise RuntimeError("ctranslate2 没找到 CUDA 设备")
+        ct = gpu.pick_compute_type()
+        g = gpu.nvidia_gpu() or {}
+        LAST_ENGINE = f"faster-whisper · CUDA（{g.get('name', 'NVIDIA')}，{ct}）"
+        key = (model, "cuda", ct)
+    else:
+        threads = cpu_threads(thr.limit)
+        why = ""
+        if _MLX_BROKEN and is_apple_silicon():
+            why = f"（mlx 不可用：{_MLX_BROKEN[:60]}）"
+        elif gpu._BROKEN:
+            why = f"（显卡不可用：{gpu._BROKEN[:60]}）"
+        LAST_ENGINE = "faster-whisper · CPU" + why
+        key = (model, "cpu", threads)
+    log(f"引擎 {LAST_ENGINE}")
     if key not in _MODEL_CACHE:
         path = ensure_model("faster", model, mirror, lambda f, t: say(0.0, t))
         say(0.0, "加载模型…")
-        _MODEL_CACHE[key] = WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=threads)
+        if device == "cuda":
+            _MODEL_CACHE[key] = WhisperModel(path, device="cuda", compute_type=key[2])
+        else:
+            _MODEL_CACHE[key] = WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=key[2])
     m = _MODEL_CACHE[key]
     say(0.0, f"识别中（{LAST_ENGINE}）…")
     t0 = time.time()
@@ -330,8 +371,13 @@ def transcribe(audio: np.ndarray, model: str = "small", engine: str | None = Non
 # 识别是重活：放在界面同一个进程里会和界面抢 Python 的 GIL，对齐时整个窗口一顿一顿的。
 # 子进程里读音频 + 识别，只把进度和词表传回来；崩了也不会带走主程序。
 
-def _child_main(conn, video, model, engine, mirror, limit, log_file):
-    global LOG_FILE
+def _child_main(conn, video, model, engine, mirror, limit, log_file, broken=None):
+    global LOG_FILE, _MLX_BROKEN
+    broken = broken or {}
+    if broken.get("mlx"):
+        _MLX_BROKEN = broken["mlx"]       # 主进程里已经知道坏了：子进程别再试一遍
+    if broken.get("cuda"):
+        gpu._BROKEN = broken["cuda"]
     lower_priority()
     LOG_FILE = Path(log_file) if log_file else None
     paused = [False]
@@ -370,7 +416,7 @@ def _child_main(conn, video, model, engine, mirror, limit, log_file):
         words = transcribe(audio, model=model, engine=engine, mirror=mirror,
                            progress=lambda f, t="": say(0.05 + 0.9 * f, t), limit=lambda: cur_limit[0],
                            pause=poll)
-        conn.send(("ok", words, LAST_ENGINE, _MLX_BROKEN, dur))
+        conn.send(("ok", words, LAST_ENGINE, _MLX_BROKEN, dur, gpu._BROKEN))
     except BaseException as ex:  # noqa
         try:
             conn.send(("err", f"{ex}", traceback.format_exc()[-1500:]))
@@ -396,12 +442,14 @@ def transcribe_isolated(video: Path, model="small", engine=None, mirror=True, li
     ctx = mp.get_context("spawn")
     a, b = ctx.Pipe(duplex=True)
     pr = ctx.Process(target=_child_main, name="clipper-align",
-                     args=(b, str(video), model, engine, mirror, limit, str(LOG_FILE) if LOG_FILE else ""),
+                     args=(b, str(video), model, engine, mirror, limit, str(LOG_FILE) if LOG_FILE else "",
+                           dict(mlx=_MLX_BROKEN, cuda=gpu._BROKEN)),
                      daemon=True)
     pr.start()
     b.close()
     say = progress or (lambda f, t="": None)
     dur, last_state, last_lim = 0.0, None, limit
+    last_text = [""]
     try:
         while True:
             if limit_fn:
@@ -428,21 +476,31 @@ def transcribe_isolated(video: Path, model="small", engine=None, mirror=True, li
                         pass
             if not a.poll(0.2):
                 if not pr.is_alive() and not a.poll(0):
+                    if "CUDA" in last_text[0]:
+                        gpu.mark_broken(f"识别子进程在显卡上崩溃（代码 {pr.exitcode}）")
+                        raise RuntimeError(f"识别子进程在显卡上崩溃（代码 {pr.exitcode}），本次运行已改用 CPU，重试这一集即可")
                     raise RuntimeError(f"识别子进程意外退出（代码 {pr.exitcode}）")
                 continue
             try:
                 m = a.recv()
             except EOFError:
+                pr.join(3)
+                if "CUDA" in last_text[0]:
+                    gpu.mark_broken(f"识别子进程在显卡上崩溃（代码 {pr.exitcode}）")
+                    raise RuntimeError(f"识别子进程在显卡上崩溃（代码 {pr.exitcode}），本次运行已改用 CPU，重试这一集即可")
                 raise RuntimeError(f"识别子进程意外退出（代码 {pr.exitcode}）")
             if m[0] == "p":
+                last_text[0] = m[2] or last_text[0]
                 say(m[1], m[2])
             elif m[0] == "dur":
                 dur = m[1]
             elif m[0] == "ok":
-                _, words, eng, broken, d = m
+                _, words, eng, broken, d = m[:5]
                 LAST_ENGINE = eng or LAST_ENGINE
                 if broken:
                     _MLX_BROKEN = broken
+                if len(m) > 5 and m[5]:
+                    gpu._BROKEN = m[5]
                 return (d or dur), words
             elif m[0] == "err":
                 if "下载" in m[1] or "音频" in m[1] or "ffmpeg" in m[1]:

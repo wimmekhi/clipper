@@ -65,12 +65,17 @@ class SettingsDialog(QDialog):
         self.auto_align.setChecked(bool(settings.get("auto_align", False)))
         fa.addRow(self.auto_align)
         self.engine = QComboBox()
-        self.engine.addItem("自动（Apple 芯片 Mac 用 mlx GPU，出错或 Windows 用 CPU）", "")
+        self.engine.addItem("自动（Mac 用 Apple GPU；Windows 有 N 卡且下好运行库就用显卡，否则 CPU）", "")
         self.engine.addItem("faster-whisper（CPU）", "faster")
         self.engine.addItem("mlx-whisper（Mac Apple 芯片 GPU）", "mlx")
+        self.engine.addItem("faster-whisper（Windows NVIDIA 显卡 CUDA）", "cuda")
         i = self.engine.findData(settings.get("align_engine", ""))
         self.engine.setCurrentIndex(max(0, i))
         fa.addRow("识别引擎", self.engine)
+        from .cudapanel import CudaPanel
+        from .. import gpu as _gpu
+        if _gpu.is_windows():
+            fa.addRow("显卡加速", CudaPanel(self))
         self.model = QComboBox()
         for m in ("tiny.en", "base.en", "small.en", "small", "medium.en", "large-v3-turbo"):
             self.model.addItem(m)

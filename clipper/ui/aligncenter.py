@@ -11,7 +11,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushB
                                QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar, QPlainTextEdit,
                                QAbstractItemView, QSplitter, QWidget, QMessageBox)
 
-from .. import align
+from .. import align, gpu
+from .cudapanel import CudaPanel
 
 MODELS = ["small", "base", "tiny", "medium", "large-v3-turbo"]
 STATUS_TEXT = {"none": "未对齐", "queued": "排队中", "running": "对齐中", "done": "完成", "error": "失败"}
@@ -31,8 +32,18 @@ class EngineProbe(QThread):
                 self.done.emit("faster-whisper · CPU（设置里手动选的）")
                 return
             eng = align.default_engine()
+            if self.pref == "mlx" and align.is_apple_silicon():
+                eng = "mlx"
             if eng == "mlx":
                 self.done.emit("mlx-whisper · " + align.mlx_device())
+            elif eng == "auto_win":
+                st = gpu.status()
+                if st["state"] == "ready":
+                    self.done.emit("faster-whisper · CUDA（" + (gpu.nvidia_gpu() or {}).get("name", "NVIDIA") + "）")
+                elif st["state"] == "need_runtime":
+                    self.done.emit("faster-whisper · CPU（检测到 N 卡，下载 CUDA 运行库后可用显卡）")
+                else:
+                    self.done.emit("faster-whisper · CPU（" + st["text"] + "）")
             else:
                 why = f"（mlx 不可用：{align._MLX_BROKEN}）" if align._MLX_BROKEN else ""
                 self.done.emit("faster-whisper · CPU" + why)
@@ -61,8 +72,9 @@ class AlignCenter(QDialog):
         top.addWidget(self.model)
         top.addWidget(QLabel("引擎"))
         self.engine = QComboBox()
-        self.engine.addItem("自动（Apple 芯片用 GPU）", ""); self.engine.addItem("faster-whisper（CPU）", "faster")
-        self.engine.addItem("mlx-whisper（GPU）", "mlx")
+        self.engine.addItem("自动（有 GPU 用 GPU）", ""); self.engine.addItem("faster-whisper（CPU）", "faster")
+        self.engine.addItem("mlx-whisper（Mac GPU）", "mlx")
+        self.engine.addItem("faster-whisper（N 卡 CUDA）", "cuda")
         top.addWidget(self.engine)
         self.mirror = QCheckBox("模型走国内镜像"); top.addWidget(self.mirror)
         top.addWidget(QLabel("性能上限"))
@@ -72,6 +84,10 @@ class AlignCenter(QDialog):
         self.limit.setToolTip("限制对齐占用的 GPU/CPU，机器不那么烫，对齐会变慢；中途改马上生效")
         top.addWidget(self.limit)
         v.addLayout(top)
+        if gpu.is_windows():
+            self.cuda = CudaPanel(self, compact=True)
+            self.cuda.changed.connect(self.probe)
+            v.addWidget(self.cuda)
 
         # 当前进度
         box = QWidget(); bl = QVBoxLayout(box); bl.setContentsMargins(0, 6, 0, 6)
