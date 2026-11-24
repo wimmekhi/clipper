@@ -1,6 +1,7 @@
 """字幕解析：SRT / ASS，双语/多语字幕拆成英文主文本 + 中文译文。"""
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,13 +85,33 @@ def count_speakers(en: str, lines: list[str]) -> int:
 _HI = re.compile(r"\[[^\]]*\]|\([^)]*\)|♪+|#")
 
 
+_KEEP_UPPER = {"tv", "fbi", "cia", "nyc", "usa", "dna", "ok", "ceo", "nba", "nfl", "gps", "atm", "dvd", "ufo",
+               "nasa", "ted", "ai", "phd", "dj", "mvp", "vip", "sos"}
+
+
+def fix_caps(s: str) -> str:
+    """1.3.0：整句全大写的英文字幕（THIS IS YOUR SECOND CHANCE.）改成正常的句子大小写
+    （This is your second chance.）：句首大写、单独的 I（I'm / I'll…）大写，常见缩写保持大写。
+    本来就是正常大小写的句子不动。"""
+    letters = [c for c in s if "a" <= c.lower() <= "z"]
+    if len(letters) < 3 or sum(c.isupper() for c in letters) < 0.8 * len(letters):
+        return s
+    t = s.lower()
+    t = re.sub(r"\b[a-z]+\b", lambda m: m.group(0).upper() if m.group(0) in _KEEP_UPPER else m.group(0), t)
+    t = re.sub(r"\bi\b", "I", t)
+    t = re.sub(r"(^|[.!?]\s+|[.!?][\"')\]]\s+|^[\"'(\[¿¡-]+\s*)([a-z])",
+               lambda m: m.group(1) + m.group(2).upper(), t)
+    return t
+
+
 def clean_en(s: str) -> str:
+    s = html.unescape(s)         # 1.3.0：That&#x27;s → That's
     s = _HI.sub(" ", s)
     s = re.sub(r"^\s*[-–—]\s*", "", s)
     s = re.sub(r"\s[-–—]\s*(?=[A-Z])", " ", s)
     s = re.sub(r"^[A-Z][A-Z .']{1,20}:\s*", "", s)   # 说话人前缀 MITCHELL:
     s = re.sub(r"\s+", " ", s).strip()
-    return s
+    return fix_caps(s)
 
 
 # ---------- SRT ----------
@@ -203,6 +224,7 @@ def load_cues(path: Path, zh_path: Path | None = None) -> list[Cue]:
     raw = _merge_same_time(raw)
     cues: list[Cue] = []
     for st, en_t, lines in raw:
+        lines = [html.unescape(l) for l in lines]
         en, zh = split_langs(lines)
         en_lines = [l for l in lines if line_lang(l) == "en"]
         sp = count_speakers(en, en_lines)

@@ -1,7 +1,8 @@
 """主窗口（1.0.7）：结构参照 quipclipper —— 顶栏（品牌 + 带范围的搜索框 + 页面导航 + 更新 / 设置），
-下面分页：媒体库 / 搜索 / 工作台 / 采集包 / 导出任务。页面里的各块用分隔条，拖动可调大小。
+下面分页：媒体库 / 剪辑 / 采集包 / 导出任务。页面里的各块用分隔条，拖动可调大小。
 
-工作台 = 播放器 + 整集说话地图 + 可缩放波形（选区两端吸附词边界 / 字幕边 / 静音 / 过零点）+ 台词本（跟随播放）。
+剪辑页（1.3.0 起搜索和工作台合一）= 左：搜索结果 / 本集台词；右：播放器 + 可缩放波形（选区两端吸附）+ 整集说话地图。
+选区一改就自动存成这一条的微调，收藏、单条导出、批量导出都按它来。
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ from ..library import Library, JOIN_BASE, AUTO_BASE
 from ..search import Searcher, Hit, TIER_ORIG, TIER_NEAR, TIER_FUNC, _tier_rank
 from ..export import Style, clip_name
 from .widgets import (WaveformView, DialogueMap, GroupHeader, ResultRow, fmt_ms, fmt_short, highlight_html,
-                      TIMING_TEXT, FlowLayout, tag, MONO, TagDelegate)
+                      TIMING_TEXT, FlowLayout, tag, MONO, TagDelegate, Toast, star_pop)
 from .workers import ScanWorker, AlignWorker, ExportWorker, WaveWorker, UpdateCheck, UpdateDownload
 from .dialogs import SettingsDialog, ExportDialog
 from . import theme
@@ -36,8 +37,9 @@ from .theme import icon
 
 APP = "台词切片编辑器"
 PAGE = 80
-P_LIB, P_SEARCH, P_WORK, P_PACK, P_TASKS = range(5)
-PAGES = (("媒体库", "library"), ("搜索", "search"), ("工作台", "scissors"), ("采集包", "package"), ("导出任务", "export"))
+P_LIB, P_SEARCH, P_PACK, P_TASKS = range(4)
+P_WORK = P_SEARCH          # 1.3.0：搜索和工作台合成「剪辑」一页
+PAGES = (("媒体库", "library"), ("剪辑", "scissors"), ("采集包", "package"), ("导出任务", "export"))
 LINK_RX = re.compile(r"^\s*clip://([^#\s]+)#(\d+)")
 
 
@@ -107,7 +109,8 @@ class MainWindow(QMainWindow):
         self._wave_token = 0
         self._wave_workers = []
         self._stop_at = None
-        self._prev_page = P_SEARCH
+        self._pending_cut = None
+        self._cut_timer = QTimer(self, singleShot=True, interval=400, timeout=self._flush_cut)
         self.lib_show = ""
         self._build_topbar()
         self._build_pages()
@@ -117,7 +120,7 @@ class MainWindow(QMainWindow):
         if geo is not None:
             self.restoreGeometry(geo)
         for sp in self.findChildren(QSplitter):
-            st = self.qs.value("split107/" + sp.objectName())
+            st = self.qs.value("split130/" + sp.objectName())
             if st is not None:
                 sp.restoreState(st)
         self.goto(P_LIB)
@@ -205,12 +208,8 @@ class MainWindow(QMainWindow):
         self.toolbar = tb
 
     def goto(self, i):
-        if self.stack.currentIndex() != i and self.stack.currentIndex() in (P_LIB, P_SEARCH, P_PACK):
-            self._prev_page = self.stack.currentIndex()
         self.stack.setCurrentIndex(i)
         self.nav[i].setChecked(True)
-        # 同一个播放器：在哪页就把画面接到哪页
-        self.player.setVideoOutput(self.video if i == P_WORK else self.video_search)
         if i == P_LIB:
             self.refresh_lib_page()
 
@@ -226,11 +225,12 @@ class MainWindow(QMainWindow):
         self.player.mediaStatusChanged.connect(self._on_status)
         self.stack.addWidget(self._page_library())
         self.stack.addWidget(self._page_search())
-        self.stack.addWidget(self._page_work())
+        self.player.setVideoOutput(self.video)
         self.stack.addWidget(self._page_packs())
         self.stack.addWidget(self._page_tasks())
         wrap = QWidget(); v = QVBoxLayout(wrap); v.setContentsMargins(16, 14, 16, 8); v.addWidget(self.stack)
         self.setCentralWidget(wrap)
+        self.toast = Toast(wrap)
 
     # ------------------------------------------------------------ 媒体库页
     def _page_library(self):
@@ -322,7 +322,7 @@ class MainWindow(QMainWindow):
         self.eps.itemDoubleClicked.connect(lambda it, _c: self.open_episode(it.data(0, Qt.UserRole)))
         self.eps.setContextMenuPolicy(Qt.CustomContextMenu)
         self.eps.customContextMenuRequested.connect(self._eps_menu)
-        self.eps.setToolTip("双击在工作台打开" + ("；右键对齐" if ALIGN_UI else ""))
+        self.eps.setToolTip("双击在剪辑页打开" + ("；右键对齐" if ALIGN_UI else ""))
         epw, epv = panel((6, 6, 6, 6))
         epv.addWidget(self.eps)
         mv.addWidget(epw, 1)
@@ -331,7 +331,7 @@ class MainWindow(QMainWindow):
         sp.setSizes([240, 1100])
         return sp
 
-    # ------------------------------------------------------------ 搜索页
+    # ------------------------------------------------------------ 剪辑页（1.3.0：搜索 + 工作台合成一页）
     def _page_search(self):
         page = QWidget(); v = QVBoxLayout(page); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
         opts = FlowLayout(spacing=6)
@@ -369,106 +369,86 @@ class MainWindow(QMainWindow):
             self.tabs.addTab(t)
         self.tabs.setDrawBase(False); self.tabs.setExpanding(False)
         self.tabs.currentChanged.connect(lambda _: self.render_results())
-        th.addWidget(self.tabs)
-        self.count_lb = label("输入台词或句型后回车", "muted")
-        th.addWidget(self.count_lb, 1)
-        v.addLayout(th)
+        th.addWidget(self.tabs); th.addStretch(1)
+        self.count_lb = label("输入台词或句型后回车", "small", True)
 
         sp = QSplitter(Qt.Horizontal); sp.setObjectName("sp_search"); sp.setChildrenCollapsible(False)
-        left = QWidget(); lv = QVBoxLayout(left); lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(8)
+        # ---------- 左栏：搜索结果 / 本集台词 两个标签
+        lw, lv = panel((8, 8, 8, 8), 6)
+        lt = QHBoxLayout(); lt.setSpacing(6)
+        self.left_res = chip("搜索结果", True, "这次搜索的结果")
+        self.left_scr = chip("本集台词", False, "当前这一集的全部台词（点一句选中并播放）")
+        g = QButtonGroup(self); g.setExclusive(True)
+        for i, c in enumerate((self.left_res, self.left_scr)):
+            g.addButton(c); lt.addWidget(c)
+            c.clicked.connect(lambda _=False, i=i: self.left_stack.setCurrentIndex(i))
+        lt.addStretch(1)
+        self.c_follow = chip("跟随播放", True, "播放时本集台词自动滚到正在说的那句")
+        lt.addWidget(self.c_follow)
+        lv.addLayout(lt)
+        self.left_stack = QStackedWidget()
+        self.left_stack.currentChanged.connect(lambda i: (self.left_res.setChecked(i == 0),
+                                                          self.left_scr.setChecked(i == 1),
+                                                          self.c_follow.setVisible(i == 1)))
+        self.c_follow.setVisible(False)
+        # 搜索结果
+        resw = QWidget(); rv = QVBoxLayout(resw); rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(6)
+        rv.addLayout(th)                 # 1.3.0：原句型 / 近似变体…标签和计数放进左栏，右边视频区更高
+        rv.addWidget(self.count_lb)
         self.results = QListWidget(); self.results.setObjectName("results")
         self.results.setSpacing(3)
         self.results.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.results.verticalScrollBar().valueChanged.connect(self._maybe_more)
         self.results.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.results.setSelectionMode(QAbstractItemView.NoSelection)
-        self.results.setMinimumWidth(380)
+        self.results.setMinimumWidth(340)
         self._relayout_timer = QTimer(self, singleShot=True, interval=60, timeout=self._relayout_rows)
         self.results.viewport().installEventFilter(self)
-        lv.addWidget(self.results, 1)
-        # 底部批量操作条
+        rv.addWidget(self.results, 1)
         bar = QFrame(); bar.setObjectName("batchbar")
-        bh = QHBoxLayout(bar); bh.setContentsMargins(14, 8, 10, 8); bh.setSpacing(8)
+        bh = QHBoxLayout(bar); bh.setContentsMargins(10, 6, 8, 6); bh.setSpacing(6)
         self.c_all = QCheckBox("全选"); self.c_all.toggled.connect(self._check_all)
         bh.addWidget(self.c_all)
-        self.sel_lb = label("勾选几条可以一起采集 / 导出", "muted"); bh.addWidget(self.sel_lb, 1)
-        self.pack_btn_s = self._pack_button()
-        bh.addWidget(self.pack_btn_s)
-        self.b_bcollect = btn("采集选中", "star", self._batch_collect)
+        self.sel_lb = label("", "muted"); bh.addWidget(self.sel_lb, 1)
+        self.b_bcollect = btn("收藏选中", "star", self._batch_collect)
         self.b_bexport = btn("导出选中", "scissors", self._batch_export, "primary")
         bh.addWidget(self.b_bcollect); bh.addWidget(self.b_bexport)
-        lv.addWidget(bar)
-        sp.addWidget(left)
-        # 右侧预览
-        pv_w, pv = panel((14, 12, 14, 12), 6)
-        pv.addWidget(label("预览", "eyebrow"))
-        self.pv_title = label("", "h2", True); pv.addWidget(self.pv_title)
-        self.pv_time = label("", "mono"); pv.addWidget(self.pv_time)
-        vf = QFrame(); vf.setObjectName("videoFrame")
-        vfl = QVBoxLayout(vf); vfl.setContentsMargins(4, 4, 4, 4)
-        self.video_search = QVideoWidget(); self.video_search.setMinimumSize(160, 96)
-        self.video_search.setStyleSheet("background:#0F172A;")
-        vfl.addWidget(self.video_search)
-        pv.addWidget(vf, 3)
-        self.pv_en = label("", wrap=True); self.pv_en.setStyleSheet("font-size:15px;font-weight:600;")
-        self.pv_zh = label("", "muted", True)
-        pv.addWidget(self.pv_en); pv.addWidget(self.pv_zh)
-        prow = QHBoxLayout(); prow.setSpacing(6)
-        self.b_play = btn("播放本句", "play", self.play_clip, "primary", "Ctrl+Enter")
-        prow.addWidget(self.b_play)
-        self.speed = QComboBox()
-        for s in ("0.5", "0.75", "1.0", "1.25"):
-            self.speed.addItem(s + "×", float(s))
-        self.speed.setCurrentIndex(2)
-        self.speed.currentIndexChanged.connect(lambda _: self.player.setPlaybackRate(self.speed.currentData()))
-        self.speed.setToolTip("倍速")
-        prow.addWidget(self.speed)
-        self.c_loop = QPushButton(icon("loop", theme.ACCENT_D, 16), "连播"); self.c_loop.setObjectName("chip")
-        self.c_loop.setCheckable(True); self.c_loop.setToolTip("播完自动下一条")
-        prow.addWidget(self.c_loop)
-        prow.addStretch(1)
-        pv.addLayout(prow)
-        pv.addWidget(label("上下文", "eyebrow"))
-        self.ctx = QListWidget(); self.ctx.setObjectName("script"); self.ctx.setWordWrap(True)
-        self.ctx.itemDoubleClicked.connect(self._ctx_pick)
-        self.ctx.setToolTip("双击播放这一句")
-        pv.addWidget(self.ctx, 2)
-        pv.addWidget(btn("在工作台打开", "scissors", lambda: self.cur and self.open_workspace(self.cur),
-                         tip="精修切点、看整集台词本"))
-        pv_w.setMinimumWidth(280)
-        sp.addWidget(pv_w)
-        sp.setStretchFactor(0, 3); sp.setStretchFactor(1, 2)
-        sp.setSizes([820, 480])
-        v.addWidget(sp, 1)
-        return page
+        rv.addWidget(bar)
+        self.left_stack.addWidget(resw)
+        # 本集台词
+        self.script = QListWidget(); self.script.setObjectName("script"); self.script.setWordWrap(True)
+        self.script.setUniformItemSizes(False)
+        self.script.itemClicked.connect(lambda it: self.pick_cue(it.data(Qt.UserRole),
+                                                                 bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)))
+        self.script.setToolTip("点一句选中并播放；Shift 点把选区扩到这句；紫色斜体是识别补出的")
+        self.left_stack.addWidget(self.script)
+        lv.addWidget(self.left_stack, 1)
+        lw.setMinimumWidth(330)
+        sp.addWidget(lw)
 
-    # ------------------------------------------------------------ 工作台
-    def _page_work(self):
-        page = QWidget(); v = QVBoxLayout(page); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(10)
-        hd = QHBoxLayout(); hd.setSpacing(12)
-        hd.addWidget(btn("返回", "back", lambda: self.goto(self._prev_page), tip="回到上一页"), 0, Qt.AlignTop)
-        tv = QVBoxLayout(); tv.setSpacing(2)
-        self.ws_title = label("还没打开片段", "h1"); tv.addWidget(self.ws_title)
-        self.ws_sub = label("在搜索结果里双击一条，或在媒体库里双击一集", "muted")
+        # ---------- 右栏：预览 + 精修
+        right = QWidget(); rv = QVBoxLayout(right); rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(8)
+        hd = QHBoxLayout(); hd.setSpacing(8)
+        tv = QVBoxLayout(); tv.setSpacing(1)
+        self.ws_title = label("还没选片段", "h2"); tv.addWidget(self.ws_title)
+        self.ws_sub = label("搜索后在左边点一条，或在媒体库里双击一集", "muted")
         self.ws_sub.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         tv.addWidget(self.ws_sub)
         hd.addLayout(tv, 1)
         self.pack_btn_w = self._pack_button()
         hd.addWidget(self.pack_btn_w, 0, Qt.AlignVCenter)
-        hd.addWidget(btn("采集", "star", lambda: self._cur_do(self.collect), tip="采集到当前包（Ctrl+D）"), 0,
-                     Qt.AlignVCenter)
+        self.b_fav = btn("收藏", "star", lambda: self._cur_do(self.collect), tip="收藏到当前采集包（Ctrl+D）")
+        hd.addWidget(self.b_fav, 0, Qt.AlignVCenter)
         hd.addWidget(btn("复制链接", "link", lambda: self._cur_do(self.copy_link)), 0, Qt.AlignVCenter)
-        hd.addWidget(btn("导出这条", "scissors", lambda: self._cur_do(self.export_one), "primary",
+        hd.addWidget(btn("导出片段", "scissors", lambda: self._cur_do(self.export_one), "primary",
                          "Ctrl+E"), 0, Qt.AlignVCenter)
-        v.addLayout(hd)
-
-        sp = QSplitter(Qt.Horizontal); sp.setObjectName("sp_work"); sp.setChildrenCollapsible(False)
+        rv.addLayout(hd)
         left = QSplitter(Qt.Vertical); left.setObjectName("sp_work_left"); left.setChildrenCollapsible(False)
         # 播放器
         pw, pv = panel((10, 10, 10, 10), 6)
         vf = QFrame(); vf.setObjectName("videoFrame")
         vfl = QVBoxLayout(vf); vfl.setContentsMargins(4, 4, 4, 4)
-        self.video = QVideoWidget(); self.video.setMinimumSize(200, 112)
+        self.video = QVideoWidget(); self.video.setMinimumSize(160, 90)
         self.video.setStyleSheet("background:#0F172A;")
         vfl.addWidget(self.video)
         pv.addWidget(vf, 1)
@@ -483,14 +463,21 @@ class MainWindow(QMainWindow):
         self.b_play_w = btn("播放 / 暂停", "play", self.toggle_play, "primary", "空格")
         ctl.addWidget(self.b_play_w)
         ctl.addWidget(btn("", "next", lambda: self.step(1), tip="下一条结果（Ctrl+↓）"))
+        self.speed = QComboBox()
+        for s in ("0.5", "0.75", "1.0", "1.25"):
+            self.speed.addItem(s + "×", float(s))
+        self.speed.setCurrentIndex(2)
+        self.speed.currentIndexChanged.connect(lambda _: self.player.setPlaybackRate(self.speed.currentData()))
+        self.speed.setToolTip("倍速")
+        ctl.addSpacing(10); ctl.addWidget(self.speed)
+        self.c_loop = QPushButton(icon("loop", theme.ACCENT_D, 16), "连播"); self.c_loop.setObjectName("chip")
+        self.c_loop.setCheckable(True); self.c_loop.setToolTip("播完自动下一条")
+        ctl.addWidget(self.c_loop)
         ctl.addStretch(1)
         pv.addLayout(ctl)
         left.addWidget(pw)
         # 切点编辑
         ew, ev = panel((12, 10, 12, 10), 7)
-        self.dmap = DialogueMap(); self.dmap.seek.connect(self._map_seek)
-        self.dmap.setToolTip("整集的说话分布（紫色是识别补出的）；点哪儿跳到哪儿")
-        ev.addWidget(self.dmap)
         r1 = FlowLayout(spacing=6)
         for ic, tip, fn in (("minus", "缩小（Ctrl+滚轮）", lambda: self.wave.zoom(1.5)),
                             ("plus", "放大（Ctrl+滚轮）", lambda: self.wave.zoom(1 / 1.5))):
@@ -516,8 +503,7 @@ class MainWindow(QMainWindow):
         r2.addWidget(btn("出点前 1 秒", "play", self.audition_out, tip="只听结尾 1 秒（]）"))
         r2.addWidget(btn("选到虚线", "fit", self.select_sub,
                          tip="选区一键定到两条虚线之间（原字幕时间）（U）"))
-        r2.addWidget(btn("保存微调", "bookmark", self.save_cut, tip="Ctrl+S；重新对齐也不会覆盖"))
-        r2.addWidget(btn("恢复自动", None, self.reset_cut, "ghost"))
+        r2.addWidget(btn("恢复自动", None, self.reset_cut, "ghost", "选区改回软件算的切点"))
         ev.addLayout(r2)
         self.wave = WaveformView()
         self.wave.changed.connect(self._cut_changed)
@@ -527,29 +513,19 @@ class MainWindow(QMainWindow):
         self.wave.snap = set(k for k in snaps if k)
         ev.addWidget(self.wave, 1)
         self.cut_lb = label("", "small", True); ev.addWidget(self.cut_lb)
-        hint = label("拖两端改切点，空白处拖出新选区；单击从那里播放；点上面的台词条选中那句，Shift 点加选；"
-                     "滚轮平移，Ctrl/⌘+滚轮缩放。按 I / O 把入点 / 出点设到播放头。", "small", True)
-        ev.addWidget(hint)
+        self.wave.setToolTip("拖两端改切点（自动保存，收藏 / 导出都按调好的范围）；空白处拖出新选区；单击从那里播放；"
+                             "Shift 点台词条加选；滚轮平移，Ctrl/⌘+滚轮缩放；I / O 设入出点，U 选到虚线")
+        self.dmap = DialogueMap(); self.dmap.seek.connect(self._map_seek)
+        self.dmap.setToolTip("整集的说话分布（紫色是识别补出的）；点哪儿跳到哪儿")
+        ev.addWidget(self.dmap)
+        ew.setMinimumHeight(330)      # 两行按钮在窄窗口会折行，留够高度免得波形和文字叠在一起
         left.addWidget(ew)
-        left.setSizes([420, 380])
-        sp.addWidget(left)
-        # 台词本
-        sw, sv = panel((10, 10, 10, 10), 6)
-        sh = QHBoxLayout()
-        sh.addWidget(label("台词本", "h2"), 1)
-        self.c_follow = chip("跟随播放", True, "播放时自动滚到正在说的那句")
-        sh.addWidget(self.c_follow)
-        sv.addLayout(sh)
-        self.script = QListWidget(); self.script.setObjectName("script"); self.script.setWordWrap(True)
-        self.script.setUniformItemSizes(False)
-        self.script.itemClicked.connect(lambda it: self.pick_cue(it.data(Qt.UserRole),
-                                                                 bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)))
-        self.script.setToolTip("点一句选中并播放；Shift 点把选区扩到这句；紫色斜体是识别补出的")
-        sv.addWidget(self.script, 1)
-        sw.setMinimumWidth(260)
-        sp.addWidget(sw)
-        sp.setStretchFactor(0, 3); sp.setStretchFactor(1, 2)
-        sp.setSizes([860, 460])
+        left.setSizes([430, 360])
+        rv.addWidget(left, 1)
+        right.setMinimumWidth(420)
+        sp.addWidget(right)
+        sp.setStretchFactor(0, 1); sp.setStretchFactor(1, 2)
+        sp.setSizes([470, 900])
         v.addWidget(sp, 1)
         return page
 
@@ -568,7 +544,7 @@ class MainWindow(QMainWindow):
             hd.addWidget(btn(t, None, fn, "ghost"))
         hd.addWidget(btn("导出此包", "package", self.export_pack, "primary", "Ctrl+Shift+E"))
         v.addLayout(hd)
-        v.addWidget(label("包里的片段按顺序导出，可拼成合集长视频。双击一条在工作台打开。", "muted"))
+        v.addWidget(label("包里的片段按顺序导出，可拼成合集长视频。双击一条在剪辑页打开。", "muted"))
         w, pv = panel((6, 6, 6, 6))
         self.pack_list = QListWidget(); self.pack_list.setObjectName("script"); self.pack_list.setWordWrap(True)
         self.pack_list.itemDoubleClicked.connect(self._pack_pick)
@@ -593,9 +569,9 @@ class MainWindow(QMainWindow):
     def _pack_button(self):
         b = QToolButton(); b.setObjectName("topbtn"); b.setPopupMode(QToolButton.InstantPopup)
         b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        b.setIcon(icon("package", theme.ACCENT_D, 16)); b.setText("采集到：—")
+        b.setIcon(icon("package", theme.ACCENT_D, 16)); b.setText("收藏到：—")
         b.setStyleSheet("QToolButton::menu-indicator{image:none;width:0;}")
-        b.setToolTip("采集到哪个包")
+        b.setToolTip("收藏进哪个采集包")
         m = QMenu(b)
         m.aboutToShow.connect(lambda m=m: self._fill_pack_menu(m))
         b.setMenu(m)
@@ -615,7 +591,7 @@ class MainWindow(QMainWindow):
         short = name if len(name) <= 16 else name[:15] + "…"
         for b in (getattr(self, "pack_btn_s", None), getattr(self, "pack_btn_w", None)):
             if b is not None:
-                b.setText(f"采集到：{short}"); b.setToolTip(f"当前采集包：{name}（点一下换）")
+                b.setText(f"收藏到：{short}"); b.setToolTip(f"收藏进哪个采集包：{name}（点一下换）")
 
     # ================================================================== 菜单 / 快捷键
     def _act(self, text, fn, key=None, tip=None, icon=None, checkable=False):  # noqa: icon 是主题图标名
@@ -668,15 +644,14 @@ class MainWindow(QMainWindow):
         A["next"] = self._act("下一条", lambda: self.step(1), "Ctrl+Down", icon="next")
         A["loop"] = self._act("连播", lambda on: self.c_loop.setChecked(on), checkable=True)
         self.c_loop.toggled.connect(A["loop"].setChecked)
-        A["work"] = self._act("在工作台打开", lambda: self._cur_do(self.open_workspace))
-        A["save_cut"] = self._act("保存微调", self.save_cut, "Ctrl+S", icon="bookmark")
+        A["save_cut"] = self._act("保存选区", self.save_cut, "Ctrl+S", icon="bookmark")
         A["reset_cut"] = self._act("恢复自动切点", self.reset_cut)
         A["aud_in"] = self._act("试听开头 1 秒", self.audition_in)
         A["aud_out"] = self._act("试听结尾 1 秒", self.audition_out)
-        A["collect"] = self._act("采集到当前包", lambda: self._cur_do(self.collect), "Ctrl+D", icon="collect")
+        A["collect"] = self._act("收藏到当前包", lambda: self._cur_do(self.collect), "Ctrl+D", icon="collect")
         A["export_one"] = self._act("导出这一条…", lambda: self._cur_do(self.export_one), "Ctrl+E", icon="export")
         A["link"] = self._act("复制片段链接", lambda: self._cur_do(self.copy_link), "Ctrl+Shift+C", icon="link")
-        for k in ("play", "prev", "next", "loop", None, "work", "save_cut", "reset_cut", "aud_in", "aud_out", None,
+        for k in ("play", "prev", "next", "loop", None, "save_cut", "reset_cut", "aud_in", "aud_out", None,
                   "collect", "export_one", "link"):
             cm.addSeparator() if k is None else cm.addAction(A[k])
         spm = cm.addMenu("倍速")
@@ -758,7 +733,6 @@ class MainWindow(QMainWindow):
         sc("U", self.select_sub, True)
         sc("Alt+Up", lambda: self._script_step(-1), True)
         sc("Alt+Down", lambda: self._script_step(1), True)
-        sc("Escape", lambda: self.goto(self._prev_page) if self.stack.currentIndex() == P_WORK else None)
 
     def _focus_changed(self, _old, new):
         typing = isinstance(new, (QLineEdit, QSpinBox, QDoubleSpinBox)) or (
@@ -769,22 +743,21 @@ class MainWindow(QMainWindow):
     def _show_keys(self):
         QMessageBox.information(self, "快捷键", "\n".join((
             "/　　　　跳到搜索框", "空格 / K　播放 / 暂停", "Ctrl+↑ / ↓　上一条 / 下一条结果",
-            "Ctrl+Enter　播放本句", "Ctrl+1…5　切换页面（媒体库 / 搜索 / 工作台 / 采集包 / 导出任务）",
-            "", "工作台：", "Enter　　播放选区", "I / O　　入点 / 出点设到播放头", "U　　　选区定到虚线（原字幕时间）", "[ / ]　　试听开头 / 结尾 1 秒",
-            "Alt+↑ / ↓　台词本上一句 / 下一句", "Ctrl+S　保存微调", "Esc　　返回",
+            "Ctrl+Enter　播放本句", "Ctrl+1…4　切换页面（媒体库 / 剪辑 / 采集包 / 导出任务）",
+            "", "剪辑页（焦点不在输入框时）：", "Enter　　播放选区", "I / O　　入点 / 出点设到播放头", "U　　　选区定到虚线（原字幕时间）", "[ / ]　　试听开头 / 结尾 1 秒",
+            "Alt+↑ / ↓　本集台词上一句 / 下一句", "选区改动自动保存",
             "波形：拖两端改切点，Alt 拖不吸附；滚轮平移，Ctrl/⌘+滚轮缩放；中键拖动平移",
-            "", "Ctrl+D 采集　Ctrl+E 导出这条　Ctrl+Shift+C 复制片段链接")))
+            "", "Ctrl+D 收藏　Ctrl+E 导出这条　Ctrl+Shift+C 复制片段链接")))
 
     def focus_search(self):
         self.q.setFocus(); self.q.selectAll()
 
     def _default_layout(self):
         for sp in self.findChildren(QSplitter):
-            self.qs.remove("split107/" + sp.objectName())
+            self.qs.remove("split130/" + sp.objectName())
         self.findChild(QSplitter, "sp_lib").setSizes([240, 1100])
-        self.findChild(QSplitter, "sp_search").setSizes([820, 480])
-        self.findChild(QSplitter, "sp_work").setSizes([860, 460])
-        self.findChild(QSplitter, "sp_work_left").setSizes([420, 380])
+        self.findChild(QSplitter, "sp_search").setSizes([470, 900])
+        self.findChild(QSplitter, "sp_work_left").setSizes([430, 360])
         self.toolbar.show()
 
     def _open_export_dir(self):
@@ -1018,7 +991,7 @@ class MainWindow(QMainWindow):
         if not keys:
             return
         mnu = QMenu(self)
-        mnu.addAction("在工作台打开", lambda: self.open_episode(keys[0]))
+        mnu.addAction("在剪辑页打开", lambda: self.open_episode(keys[0]))
         if ALIGN_UI:
             mnu.addSeparator()
             mnu.addAction(f"对齐这 {len(keys)} 集", lambda: self.queue_keys(keys))
@@ -1042,6 +1015,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP, "这一集没有台词。")
             return
         self.open_workspace(self.hit_from_row(r, m), autoplay=False)
+        self.left_stack.setCurrentIndex(1)
 
     def _realign_changed(self):
         if not self.lib:
@@ -1238,6 +1212,7 @@ class MainWindow(QMainWindow):
             self.tabs.setTabText(i, f"{k} {counts[k]}")
         self.checked.clear()
         self.goto(P_SEARCH)
+        self.left_stack.setCurrentIndex(0)
         self.render_results()
 
     def filtered(self):
@@ -1377,8 +1352,8 @@ class MainWindow(QMainWindow):
 
     def _update_sel(self):
         n = len(self.checked)
-        self.sel_lb.setText(f"已选 {n} 条" if n else "勾选几条可以一起采集 / 导出")
-        self.b_bcollect.setText(f"采集选中（{n}）" if n else "采集选中")
+        self.sel_lb.setText(f"已选 {n} 条" if n else "")
+        self.b_bcollect.setText(f"收藏选中（{n}）" if n else "收藏选中")
         self.b_bexport.setText(f"导出选中（{n}）" if n else "导出选中")
         self.b_bcollect.setEnabled(bool(n)); self.b_bexport.setEnabled(bool(n))
 
@@ -1390,10 +1365,16 @@ class MainWindow(QMainWindow):
         name = self.pack_cb.currentText()
         n = sum(self.lib.add_to_pack(name, h.media_key, h.idx, self.q.text().strip(), h.tier)
                 for h in self.checked.values())
-        self.statusBar().showMessage(f"采集了 {n} 条到「{name}」（{len(self.checked) - n} 条本来就在）", 4000)
+        self._flush_cut()
+        for h in self.checked.values():
+            if h.cue_id in self.rows:
+                self.rows[h.cue_id][1].mark_collected()
+        self.toast.pop(f"收藏了 {n} 条到「{name}」" + (f"（{len(self.checked) - n} 条本来就在）" if len(self.checked) - n else ""), n > 0)
+        self.statusBar().showMessage(f"收藏了 {n} 条到「{name}」（{len(self.checked) - n} 条本来就在）", 4000)
         self.load_pack()
 
     def _batch_export(self):
+        self._flush_cut()
         hs = [h for h in self.hits if h.cue_id in self.checked]
         if not hs:
             return
@@ -1450,6 +1431,7 @@ class MainWindow(QMainWindow):
         self.preview(h, autoplay)
 
     def preview(self, h, autoplay=True):
+        self._flush_cut()
         old = self.cur
         self.cur = h
         if old and old.cue_id in self.rows:
@@ -1457,7 +1439,6 @@ class MainWindow(QMainWindow):
         if h.cue_id in self.rows:
             self.rows[h.cue_id][1].set_selected(True)
         self.refresh_current()
-        self.show_context(h)
         if not h.has_video:
             return
         m = self.lib.media_by_key(h.media_key)
@@ -1509,9 +1490,6 @@ class MainWindow(QMainWindow):
         # 文字
         html_en = highlight_html(h.en, h.matched)
         self.sub_en.setText(html_en); self.sub_zh.setText(h.zh)
-        self.pv_en.setText(html_en); self.pv_zh.setText(h.zh)
-        self.pv_title.setText(h.label)
-        self.pv_time.setText(f"{fmt_ms(s)} – {fmt_ms(e)}")
         self.ws_title.setText(f"{h.label}")
         # 波形
         words = self.lib.words(h.media_key)
@@ -1692,7 +1670,10 @@ class MainWindow(QMainWindow):
         self.cur_span = (s, e)
         row = self._cue_row(self.cur)
         self._update_cut_label(row, s, e, "manual")
-        self.pv_time.setText(f"{fmt_ms(s)} – {fmt_ms(e)}（未保存）")
+        # 1.3.0：选区一改就记下来（停手 0.4 秒后存），收藏 / 导出都按调好的范围
+        if self.cur:
+            self._pending_cut = (self.cur.media_key, self.cur.idx, s, e)
+            self._cut_timer.start()
 
     def select_sub(self):
         """选区 = 波形上两条虚线之间（这句原字幕的时间）。"""
@@ -1701,48 +1682,30 @@ class MainWindow(QMainWindow):
             return
         self._cut_changed(float(sub[0]), float(sub[1]))
         self.wave.set_cut(self.cur_span)
-        self.statusBar().showMessage("选区已定到虚线（原字幕时间）；满意就 Ctrl+S 保存微调", 3000)
+        self.statusBar().showMessage("选区已定到虚线（原字幕时间），已自动保存", 3000)
+
+    def _flush_cut(self):
+        """把还没落盘的选区改动存下来（换条、收藏、导出前都先调一下）。"""
+        self._cut_timer.stop()
+        pc, self._pending_cut = getattr(self, "_pending_cut", None), None
+        if pc and self.lib:
+            self.lib.save_adjust(*pc)
+            cid = self.cur.cue_id if self.cur and (self.cur.media_key, self.cur.idx) == pc[:2] else None
+            if cid in self.rows:
+                self.rows[cid][1].set_span(pc[2], pc[3])
 
     def save_cut(self):
+        self._pending_cut = None; self._cut_timer.stop()
         if self.cur and self.cur_span:
             self.lib.save_adjust(self.cur.media_key, self.cur.idx, *self.cur_span)
-            self.statusBar().showMessage("已保存微调（重新对齐也不会覆盖）", 3000)
+            self.statusBar().showMessage("选区已保存（重新对齐也不会覆盖）", 3000)
             self.refresh_current()
 
     def reset_cut(self):
+        self._pending_cut = None; self._cut_timer.stop()
         if self.cur:
             self.lib.clear_adjust(self.cur.media_key, self.cur.idx)
             self.refresh_current()
-
-    # ------------------------------------------------------------ 上下文（搜索页预览里）
-    def show_context(self, h):
-        self.ctx.clear()
-        rows = self.lib.context(h.media_id, h.idx, 2)
-        base = h.idx - JOIN_BASE if JOIN_BASE <= h.idx < AUTO_BASE else h.idx
-        for r in rows:
-            t = r["a_start"] if r["a_start"] is not None else r["start"]
-            auto = r["src"] == "auto"
-            it = QListWidgetItem(f"{fmt_short(t):>8}   " + ("识别 · " if auto else "") + r["en"]
-                                 + (f"\n{'':>11}{r['zh']}" if r["zh"] else ""))
-            it.setData(Qt.UserRole, r["idx"])
-            if auto:
-                it.setForeground(QColor("#7C3AED"))
-            self.ctx.addItem(it)
-            if r["idx"] == base:
-                f = it.font(); f.setBold(True); it.setFont(f)
-                it.setBackground(QColor(204, 251, 241, 160))
-                row = self.ctx.count() - 1
-                QTimer.singleShot(0, lambda row=row: self.ctx.item(row) and self.ctx.scrollToItem(
-                    self.ctx.item(row), QAbstractItemView.PositionAtCenter))
-
-    def _ctx_pick(self, it):
-        if not self.cur:
-            return
-        r = self.lib.db.execute("SELECT * FROM cues WHERE media_id=? AND idx=?",
-                                (self.cur.media_id, it.data(Qt.UserRole))).fetchone()
-        if r:
-            s, e, _ = self.lib.final_span(r, self.cur.media_key)
-            self.play_range(s, e)
 
     # ================================================================== 采集包
     def refresh_packs(self, select=None):
@@ -1765,12 +1728,18 @@ class MainWindow(QMainWindow):
             self.refresh_packs(name.strip())
 
     def collect(self, h):
+        self._flush_cut()          # 先把调好的选区存下来，包里导出时按它切
         if self.pack_cb.count() == 0:
             self.lib.pack_id(self.q.text().strip() or "未命名")
             self.refresh_packs()
         name = self.pack_cb.currentText()
         ok = self.lib.add_to_pack(name, h.media_key, h.idx, self.q.text().strip(), h.tier)
-        self.statusBar().showMessage(f"已采集到「{name}」" if ok else "这条已经在包里了", 2500)
+        self.toast.pop(f"已收藏到「{name}」" if ok else f"这条已经在「{name}」里了", ok)
+        if h.cue_id in self.rows:
+            self.rows[h.cue_id][1].mark_collected()
+        if self.cur and h.cue_id == self.cur.cue_id:
+            star_pop(self.b_fav)
+        self.statusBar().showMessage(f"已收藏到「{name}」" if ok else "这条已经在包里了", 2500)
         self.load_pack()
 
     def load_pack(self):
@@ -1811,6 +1780,7 @@ class MainWindow(QMainWindow):
         return self.lib.get_setting("export_dir", "") or str(self.lib.root / "导出")
 
     def export_pack(self):
+        self._flush_cut()
         pid = self.pack_cb.currentData()
         if pid is None:
             return
@@ -1824,12 +1794,7 @@ class MainWindow(QMainWindow):
             self._run_export(f"采集包「{name}」", dlg.dir.text(), dlg.presets(), dlg.comp.isChecked(), pack_id=pid)
 
     def export_one(self, h):
-        if self.cur and h.cue_id == self.cur.cue_id and self.cur_span:
-            row = self._cue_row(h)
-            s, e, _ = self.lib.final_span(row, h.media_key)
-            if (abs(s - self.cur_span[0]) > 0.005 or abs(e - self.cur_span[1]) > 0.005) and \
-                    QMessageBox.question(self, "导出", "选区改了还没保存，先保存微调再导出？") == QMessageBox.Yes:
-                self.save_cut()
+        self._flush_cut()          # 1.3.0：调过的选区自动生效，不再问
         dlg = ExportDialog(h.label, 1, str(Path(self._export_dir()) / "单条"), self, name=clip_name(h.en))
         if dlg.exec():
             spec = [dict(media_key=h.media_key, idx=h.idx, pattern=self.q.text().strip(), tier=h.tier,
@@ -2003,7 +1968,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         self.qs.setValue("geometry", self.saveGeometry())
         for sp in self.findChildren(QSplitter):
-            self.qs.setValue("split107/" + sp.objectName(), sp.saveState())
+            self.qs.setValue("split130/" + sp.objectName(), sp.saveState())
         if self.align_worker:
             self.align_worker.stop()
             if not self.align_worker.wait(1500):

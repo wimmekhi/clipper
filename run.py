@@ -155,7 +155,7 @@ def _ui_test_body():
     need = ["文件", "搜索", "片段", "采集包", "对齐", "窗口", "帮助"]
     assert all(m in menus for m in need), f"菜单缺：{menus}"
     tb = w.findChild(QToolBar, "toolbar_main")
-    assert tb and len(tb.actions()) >= 9 and len(w.nav) == 5, "顶栏缺"
+    assert tb and len(tb.actions()) >= 9 and len(w.nav) == 4, "顶栏缺"
     assert w.upd_btn.isVisible() and w.upd_btn.text() == "检查更新", "顶栏没有一键更新按钮"
     w._mark_update({"version": "99.0.0", "url": "https://example.invalid/x.zip", "size": 1})
     assert w.upd_btn.text() == "更新到 99.0.0" and w.upd_btn.property("hot") == "true", "更新按钮没点亮"
@@ -188,7 +188,12 @@ def _ui_test_body():
     # 工作台
     h = w.hits[0]
     w.open_workspace(h, autoplay=False); app.processEvents()
-    assert w.stack.currentIndex() == P_WORK and w.script.count() == 3, f"台词本 {w.script.count()} 句"
+    assert w.stack.currentIndex() == P_WORK == P_SEARCH and w.script.count() == 3, f"台词本 {w.script.count()} 句"
+    # 1.3.0：搜索和工作台同一页；左栏两个标签
+    assert w.left_stack.currentIndex() == 0 and w.results.isVisible(), "合并页左栏应停在搜索结果"
+    w.left_scr.click(); app.processEvents()
+    assert w.left_stack.currentIndex() == 1 and w.script.isVisible(), "本集台词标签切不过去"
+    w.left_res.click(); app.processEvents()
     for _ in range(100):
         app.processEvents()
         if w.wave.samples is not None:
@@ -206,6 +211,13 @@ def _ui_test_body():
     w.save_cut()
     row = w._cue_row(w.cur)
     assert w.lib.final_span(row, w.cur.media_key)[2] == "manual", "微调没保存"
+    w.reset_cut()
+    # 1.3.0：选区改动自动保存；收藏 / 导出按调好的范围
+    w._cut_changed(s0 + 0.1, e0 - 0.1); w._flush_cut()
+    sp = w.lib.final_span(w._cue_row(w.cur), w.cur.media_key)
+    assert sp[2] == "manual" and abs(sp[0] - (s0 + 0.1)) < 1e-6, f"选区没自动保存：{sp}"
+    w.collect(w.cur); app.processEvents()
+    assert w.toast.isVisible() and "收藏" in w.toast.text(), "收藏没有提示"
     w.reset_cut()
     from PySide6.QtCore import Qt as _Qt
     i0, i1 = w.script.item(0).data(_Qt.UserRole), w.script.item(1).data(_Qt.UserRole)
@@ -232,9 +244,13 @@ def _ui_test_body():
     for _ in range(2):
         r = jobs.export_items(w.lib, [dict(row=xr)], od, ["横屏原画无损"], w.style())
         assert r["ok"], r
+    r = jobs.export_items(w.lib, [dict(row=xr), dict(row=xr)], od, ["横屏原画无损"], w.style(), make_compilation=False)
     names = sorted(f.name for f in (od / "横屏原画无损").iterdir())
     want = clip_name(xr["en"])
-    assert names == [f"{want} (2).mp4", f"{want}.mp4"], f"导出文件名不对：{names}"
+    assert names == sorted([f"{want}.mp4"] + [f"{want} ({k}).mp4" for k in (2, 3, 4)]), f"导出文件名不对：{names}"
+    from clipper.subs import clean_en
+    assert clean_en("THIS IS YOUR SECOND CHANCE.") == "This is your second chance." and \
+        clean_en("That&#x27;s yours.") == "That's yours.", "全大写 / 转义没处理"
     # 片段链接
     link = w.link_of(w.cur)
     w.q.setText(link); w.do_search(); app.processEvents()
@@ -243,13 +259,13 @@ def _ui_test_body():
     out = os.path.join(root, "x.mp4")
     export.export_lossless(vid, 1.0, 2.5, __import__("pathlib").Path(out))
     assert os.path.getsize(out) > 1000, "无损导出失败"
-    for i in range(5):
+    for i in range(4):
         w.goto(i); app.processEvents()
     mw = w.minimumSizeHint().width()
     assert mw <= 1000, f"主窗口最小宽度 {mw}px 太大"
     w.close(); app.processEvents()
-    return (f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、5 个页面；搜索/回车再搜/按匹配度/跨两行/工作台/选到虚线/"
-            f"链接/无损导出+字幕命名都过；最小宽 {mw}px")
+    return (f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、4 个页面；搜索/回车再搜/按匹配度/跨两行/剪辑页合并/"
+            f"选区自动保存/收藏提示/选到虚线/链接/无损导出+重名(2)/全大写转换都过；最小宽 {mw}px")
 
 
 def selftest(out, smoke_wav=None):

@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 # 1.2.0：所有集已对齐完，界面里去掉对齐功能（要对齐请用 1.1.0 及以前的版本）。对齐数据照常使用。
 ALIGN_UI = False
 

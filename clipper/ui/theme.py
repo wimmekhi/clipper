@@ -273,10 +273,10 @@ _ICONS = {
 }
 
 
-def icon(name: str, color: str = ACCENT_D, size: int = 20) -> QIcon:
+def icon(name: str, color: str = ACCENT_D, size: int = 20, fill: str | None = None) -> QIcon:
     from PySide6.QtSvg import QSvgRenderer
     body = _ICONS[name]
-    fill = color if name == "play" else "none"
+    fill = fill or (color if name == "play" else "none")
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="{fill}" stroke="{color}" '
            f'stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">{body}</svg>')
     r = QSvgRenderer(QByteArray(svg.encode()))

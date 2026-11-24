@@ -38,14 +38,19 @@ def export_items(lib, items: list[dict], out_dir: Path, presets: list[str], styl
         row = it["row"]
         meta = item_meta(lib, row, it.get("pattern", ""), it.get("tier", ""), it.get("matched", ""))
         video = lib.abs(row["rel_video"])
-        # 1.2.0：文件名 = 英文台词（单条可在导出框里改）；多条前面加序号保持顺序
+        # 1.3.0：文件名 = 英文台词（单条可在导出框里改），不加序号；
+        # 重名就像 Windows 那样在后面加 (2)、(3)…（各个版本文件夹里都不重名才用）
         nm = export.clip_name(it.get("name") or row["en"])
-        base = nm if len(items) == 1 else f"{i:03d} {nm}"
-        for p in presets:      # 同名文件已经存在：加 (2)、(3)…，不覆盖
-            f0 = out_dir / p / f"{base}{export.out_ext(p, video) if video else '.mp4'}"
-            if f0.exists() or (out_dir / "说明" / f"{base}.json").exists():
-                base = export.unique_path(f0).stem
+        exts = [export.out_ext(p, video) if video else ".mp4" for p in presets]
+
+        def taken(b):
+            return (out_dir / "说明" / f"{b}.json").exists() or any(
+                (out_dir / p / f"{b}{x}").exists() for p, x in zip(presets, exts))
+        base = nm
+        for k in range(2, 10000):
+            if not taken(base):
                 break
+            base = f"{nm} ({k})"
         meta["files"] = {}
         if not video or not video.exists():
             errors.append(f"{meta['source']} #{row['idx']}: 没有视频文件")

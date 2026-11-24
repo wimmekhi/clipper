@@ -15,7 +15,7 @@ from . import subs
 VIDEO_EXT = {".mp4", ".mkv", ".mov", ".m4v", ".avi", ".webm"}
 SUB_EXT = (".srt", ".ass", ".ssa")
 DATA_DIR = ".clipper"
-INDEX_VER = 2            # 1.0.7：加了「跨两条字幕的句子」和「识别补出的台词」
+INDEX_VER = 3            # 1.3.0：全大写字幕改成正常大小写、&#x27; 这类转义还原（重建索引，对齐结果原样接回）
 JOIN_BASE = 1_000_000    # 跨两条字幕拼起来的句子：idx = JOIN_BASE + 前一条的 idx
 AUTO_BASE = 2_000_000    # 字幕里没有、语音识别补出来的台词：idx = AUTO_BASE + 序号
 _END_PUNCT = re.compile(r"""[.?!…♪]["'”’)\]]*\s*$""")

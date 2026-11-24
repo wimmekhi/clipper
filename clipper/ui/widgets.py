@@ -349,7 +349,7 @@ class WaveformView(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(150)
+        self.setMinimumHeight(104)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.ClickFocus)
         self.t0, self.t1 = 0.0, 1.0      # 已加载的音频范围
@@ -795,7 +795,10 @@ class ResultRow(QFrame):
         self.setObjectName("row")
         self.setProperty("sel", "false")
         self.setCursor(Qt.PointingHandCursor)
-        h = QHBoxLayout(self); h.setContentsMargins(14, 8, 10, 8); h.setSpacing(10)
+        # 1.3.0：时间 / 出处 / 标签单独一行占满宽度（剪辑页左栏窄，挤在右侧按钮旁会被截断）
+        outer = QVBoxLayout(self); outer.setContentsMargins(14, 8, 10, 8); outer.setSpacing(3)
+        h = QHBoxLayout(); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(10)
+        outer.addLayout(h)
         self.cb = QCheckBox(); self.cb.setCursor(Qt.ArrowCursor)
         self.cb.toggled.connect(lambda on: self.checked.emit(self.hit, on))
         h.addWidget(self.cb, 0, Qt.AlignTop)
@@ -808,15 +811,18 @@ class ResultRow(QFrame):
         if hit.zh:
             zh = QLabel(html.escape(hit.zh)); zh.setWordWrap(True)
             zh.setStyleSheet("font-size:12px;color:#64748B;padding-bottom:2px;"); v.addWidget(zh)
-        meta = QHBoxLayout(); meta.setSpacing(6)
-        tm = QLabel(f"{fmt_ms(span[0])} – {fmt_ms(span[1])}")
+        meta = QHBoxLayout(); meta.setSpacing(6); meta.setContentsMargins(0, 0, 0, 0)
+        tm = self.tm = QLabel(f"{fmt_short(span[0])} – {fmt_short(span[1])}")
+        tm.setToolTip(f"{fmt_ms(span[0])} – {fmt_ms(span[1])}")
         tm.setStyleSheet(f"color:#0F766E;font-family:{MONO};font-size:11px;")
         meta.addWidget(tm)
         if show_source:
             meta.addWidget(tag(hit.label, "#0F766E"))
         tt, tc = TIMING_TEXT.get(timing, ("", "#999"))
         meta.addWidget(tag(hit.tier, TIER_COLOR.get(hit.tier, "#64748B")))
-        meta.addWidget(tag(tt, tc))
+        from ..paths import ALIGN_UI
+        if ALIGN_UI:                 # 1.2 起不再显示对齐状态（全部已对齐），省出位置给出处
+            meta.addWidget(tag(tt, tc))
         if hit.src == "join":
             meta.addWidget(tag("跨两行", "#0EA5E9"))
         if hit.src == "auto":
@@ -826,18 +832,32 @@ class ResultRow(QFrame):
         if hit.speakers > 1:
             meta.addWidget(tag("多人", "#94A3B8"))
         meta.addStretch(1)
-        v.addLayout(meta)
         h.addLayout(v, 1)
+        meta.insertSpacing(0, self.cb.sizeHint().width() + 10)
+        outer.addLayout(meta)
         pc = QLabel(f"{hit.pct}%"); pc.setObjectName("pct"); pc.setToolTip("匹配度：整句贴合、时长合适、单人、已对齐、有视频越高")
         h.addWidget(pc, 0, Qt.AlignVCenter)
-        for nm, tip, sig, prim in (("star", "采集到当前采集包（Ctrl+D）", self.collect, False),
-                                   ("scissors", "导出这一条（Ctrl+E）", self.export_one, True),
+        # 1.3.0：剪辑页左栏变窄，行里只留收藏和链接（导出在右边「导出片段」和底部「导出选中」）
+        for nm, tip, sig, prim in (("star", "收藏到当前采集包（Ctrl+D）", self.collect, False),
                                    ("link", "复制片段链接（粘贴到搜索框可直接打开）", self.link, False)):
             b = QPushButton(); b.setObjectName("iconPrimary" if prim else "iconBtn")
             b.setIcon(icon(nm, "#FFFFFF" if prim else "#0F766E", 16)); b.setIconSize(QSize(16, 16))
-            b.setToolTip(tip); b.setFixedSize(32, 32); b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(tip); b.setFixedSize(30, 30); b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _=False, s=sig: s.emit(self.hit))
             h.addWidget(b, 0, Qt.AlignVCenter)
+            if nm == "star":
+                self.star = b
+
+    def set_span(self, s, e):
+        self.tm.setText(f"{fmt_short(s)} – {fmt_short(e)}")
+        self.tm.setToolTip(f"{fmt_ms(s)} – {fmt_ms(e)}")
+
+    def mark_collected(self):
+        """收藏后：星星变成实心金色，并「弹」一下。"""
+        from .theme import icon
+        self.star.setIcon(icon("star", "#F59E0B", 16, fill="#FBBF24"))
+        self.star.setToolTip("已收藏（再点会提示已在包里）")
+        star_pop(self.star)
 
     def set_selected(self, on):
         self.setProperty("sel", "true" if on else "false")
@@ -881,3 +901,60 @@ class TagDelegate(QStyledItemDelegate):
             p.drawText(QRectF(x, y, w, h), Qt.AlignCenter, text)
             x += w + 4
         p.restore()
+
+
+# ---------------------------------------------------------------- 收藏动效（1.3.0）
+def star_pop(button, big=26, small=16):
+    """按钮上的图标放大再弹回（约 0.35 秒）。"""
+    from PySide6.QtCore import QVariantAnimation, QEasingCurve
+    base = button.iconSize().width() or small
+    a = QVariantAnimation(button)
+    a.setDuration(360)
+    a.setKeyValueAt(0.0, base); a.setKeyValueAt(0.45, big); a.setKeyValueAt(1.0, base)
+    a.setEasingCurve(QEasingCurve.OutBack)
+    a.valueChanged.connect(lambda v: button.setIconSize(QSize(int(v), int(v))))
+    a.start(QVariantAnimation.DeleteWhenStopped)
+
+
+class Toast(QLabel):
+    """窗口中下方浮出的小提示：淡入 + 上移，停 1.4 秒后淡出。"""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        from PySide6.QtCore import QPropertyAnimation, QSequentialAnimationGroup, QParallelAnimationGroup, QEasingCurve, QTimer
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAlignment(Qt.AlignCenter)
+        self.eff = QGraphicsOpacityEffect(self); self.eff.setOpacity(0.0); self.setGraphicsEffect(self.eff)
+        self.fade = QPropertyAnimation(self.eff, b"opacity", self)
+        self.move_a = QPropertyAnimation(self, b"pos", self)
+        self.move_a.setEasingCurve(QEasingCurve.OutCubic)
+        self.timer = QTimer(self, singleShot=True, interval=1400, timeout=self._out)
+        self.hide()
+
+    def pop(self, text, ok=True):
+        color, bg = ("#FFFFFF", "rgba(15,118,110,0.94)") if ok else ("#0F172A", "rgba(254,243,199,0.97)")
+        star = "★  " if ok else "☆  "
+        self.setText(star + text)
+        self.setStyleSheet(f"QLabel{{color:{color};background:{bg};border-radius:18px;padding:9px 22px;"
+                           f"font-size:14px;font-weight:600;}}")
+        self.adjustSize()
+        p = self.parentWidget()
+        x = (p.width() - self.width()) // 2
+        y = int(p.height() * 0.78)
+        self.fade.stop(); self.move_a.stop(); self.timer.stop()
+        self.show(); self.raise_()
+        self.move_a.setDuration(260); self.move_a.setStartValue(QPoint(x, y + 18)); self.move_a.setEndValue(QPoint(x, y))
+        self.fade.setDuration(200); self.fade.setStartValue(self.eff.opacity()); self.fade.setEndValue(1.0)
+        self.move_a.start(); self.fade.start()
+        self.timer.start()
+
+    def _out(self):
+        self.fade.stop()
+        self.fade.setDuration(450); self.fade.setStartValue(self.eff.opacity()); self.fade.setEndValue(0.0)
+        try:
+            self.fade.finished.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self.fade.finished.connect(lambda: self.hide() if self.eff.opacity() < 0.05 else None)
+        self.fade.start()
