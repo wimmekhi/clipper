@@ -263,6 +263,9 @@ def _ui_test_body():
     from clipper.export import clip_name
     from clipper.ui.dialogs import ExportDialog
     assert clip_name('Is this your sock?') == "Is this your sock", clip_name('Is this your sock?')
+    for _ww in list(w._wave_workers):      # 1.3.1：先等后台波形线程收尾，再建对话框
+        _ww.wait(60000)
+    app.processEvents()
     dlg = ExportDialog("x", 1, root, w, name=clip_name(w.cur.en))
     assert dlg.presets() == ["横屏原画无损"] and dlg.name() == clip_name(w.cur.en), f"导出框默认不对：{dlg.presets()}"
     dlg.deleteLater()

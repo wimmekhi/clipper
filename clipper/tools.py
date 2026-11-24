@@ -54,6 +54,7 @@ def no_window():
 
 
 def run(cmd, **kw):
+    kw.setdefault("close_fds", False)   # 走 posix_spawn，后台线程里拉子进程不怕 fork 卡死
     return subprocess.run(cmd, capture_output=True, text=True, **no_window(), **kw)
 
 
