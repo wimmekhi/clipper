@@ -150,7 +150,13 @@ def _ui_test_body():
     w.cancel_queue()
     assert w.lib.db.execute("SELECT align_status FROM media").fetchone()[0] == "none", "取消排队失败"
     w.start_align = real_start
-    w.open_align_center(); app.processEvents(); w.align_center.close()
+    w.open_align_center(); app.processEvents()
+    # 1.3.1：引擎检测线程会在后台 import mlx_whisper/scipy；等它结束再往下测，
+    # 免得和后面的对话框构造、ffmpeg 子进程并发（Mac CI 曾因此卡死 4 分钟）
+    _pr = getattr(w.align_center, "_probe", None)
+    if _pr is not None:
+        _pr.wait(180000); app.processEvents()
+    w.align_center.close()
     menus = [a.text() for a in w.menuBar().actions()]
     need = ["文件", "搜索", "片段", "采集包", "对齐", "窗口", "帮助"]
     assert all(m in menus for m in need), f"菜单缺：{menus}"
