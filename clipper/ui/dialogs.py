@@ -129,7 +129,9 @@ class SettingsDialog(QDialog):
         right.addWidget(pb)
         right.addStretch(1)
         hs.addLayout(right)
-        tabs.addTab(s, "字幕样式")
+        from ..paths import REENCODE_UI
+        if REENCODE_UI:   # 1.3.2 起只导出原画无损，不再烧字幕
+            tabs.addTab(s, "字幕样式")
         v = QVBoxLayout(self)
         v.addWidget(tabs)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -192,15 +194,18 @@ class ExportDialog(QDialog):
         self.setWindowTitle("导出")
         v = QVBoxLayout(self)
         v.addWidget(QLabel(f"<b>{title}</b>　共 {count} 条"))
-        box = QGroupBox("版本（可多选）")
-        bl = QVBoxLayout(box)
+        from ..paths import REENCODE_UI
         self.checks = {}
-        for p in PRESETS:
-            lossless = PRESETS[p].get("lossless")
-            c = QCheckBox(p + ("（不重新编码，几乎瞬间出片；起点落在前一个关键帧，可能早零点几秒；不参与合集）"
-                               if lossless else ""))
-            c.setChecked(bool(lossless)); bl.addWidget(c); self.checks[p] = c   # 1.2.0：默认只勾原画无损
-        v.addWidget(box)
+        self.comp = QCheckBox("同时拼成合集长视频（每个版本一条）"); self.comp.setChecked(False)
+        if REENCODE_UI:
+            box = QGroupBox("版本（可多选）")
+            bl = QVBoxLayout(box)
+            for p in PRESETS:
+                lossless = PRESETS[p].get("lossless")
+                c = QCheckBox(p + ("（不重新编码，几乎瞬间出片；起点落在前一个关键帧，可能早零点几秒；不参与合集）"
+                                   if lossless else ""))
+                c.setChecked(bool(lossless)); bl.addWidget(c); self.checks[p] = c   # 1.2.0：默认只勾原画无损
+            v.addWidget(box)
         self.name_ed = None
         if name is not None:
             nr = QHBoxLayout()
@@ -208,16 +213,20 @@ class ExportDialog(QDialog):
             nr.addWidget(QLabel("文件名")); nr.addWidget(self.name_ed, 1)
             v.addLayout(nr)
         else:
-            v.addWidget(QLabel("文件名：序号 + 英文台词，例如「001 Is this your sock.mp4」"))
-        self.comp = QCheckBox("同时拼成合集长视频（每个版本一条）"); self.comp.setChecked(count >= 2)
-        self.comp.setEnabled(count >= 2)
-        v.addWidget(self.comp)
+            v.addWidget(QLabel("文件名：英文台词，例如「Is this your sock.mp4」；重名自动加 (2)、(3)"))
+        if REENCODE_UI:
+            self.comp.setChecked(count >= 2); self.comp.setEnabled(count >= 2)
+            v.addWidget(self.comp)
         row = QHBoxLayout()
         self.dir = QLineEdit(default_dir)
         b = QPushButton("选择…"); b.clicked.connect(self._pick)
         row.addWidget(QLabel("导出到")); row.addWidget(self.dir, 1); row.addWidget(b)
         v.addLayout(row)
-        v.addWidget(QLabel("规格：H.264 + AAC 48kHz，23.976 帧，横屏 1280×720 / 竖屏 720×1280，faststart"))
+        if REENCODE_UI:
+            v.addWidget(QLabel("规格：H.264 + AAC 48kHz，23.976 帧，横屏 1280×720 / 竖屏 720×1280，faststart"))
+        else:
+            hint = QLabel("原画无损：直接从原视频截取，不重新编码，几乎瞬间出片。起点落在前一个关键帧，可能比选区早零点几秒。")
+            hint.setWordWrap(True); v.addWidget(hint)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("开始导出")
         bb.button(QDialogButtonBox.Cancel).setText("取消")
@@ -234,4 +243,6 @@ class ExportDialog(QDialog):
         return self.name_ed.text().strip() if self.name_ed is not None else ""
 
     def presets(self):
+        if not self.checks:
+            return [p for p in PRESETS if PRESETS[p].get("lossless")]
         return [p for p, c in self.checks.items() if c.isChecked()]

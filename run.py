@@ -141,6 +141,16 @@ def _ui_test_body():
     keys = [r[0] for r in w.lib.db.execute("SELECT key FROM media")]
     assert keys, "临时库没扫出集"
     assert not w.lib_settings()["auto_align"], "默认应是手动对齐"
+    # 1.3.2：快照——再打开不自动扫描；导出文件夹不进库
+    assert w.lib.snapshot() and w.lib.snapshot()["total"] == len(keys), "扫描后没存快照"
+    os.makedirs(os.path.join(root, "横屏原画无损")); open(os.path.join(root, "横屏原画无损", "S01E01 x.mp4"), "w").close()
+    first_scan = w._scan
+    w.open_library(root); app.processEvents()
+    assert w._scan is first_scan and "快照" in w.al_lb.text(), "有快照时打开不该自动扫描"
+    w.rescan(); w._scan.wait(60000); app.processEvents()
+    assert w.lib.db.execute("SELECT COUNT(*) FROM media").fetchone()[0] == len(keys), "导出文件夹被扫进库了"
+    w.f_show.setCurrentIndex(0); app.processEvents()
+    assert w.f_show.width() < 160, f"全部作品下拉太宽：{w.f_show.width()}"
     started = []
     real_start = w.start_align
     w.start_align = lambda force=False: started.append(force)
@@ -295,7 +305,7 @@ def _ui_test_body():
     mw = w.minimumSizeHint().width()
     assert mw <= 1000, f"主窗口最小宽度 {mw}px 太大"
     w.close(); app.processEvents()
-    return (f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、4 个页面；搜索/回车再搜/按匹配度/跨两行/剪辑页合并/采集包改名删除/"
+    return (f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、4 个页面；搜索/回车再搜/按匹配度/跨两行/剪辑页合并/采集包改名删除/快照不自动扫描+导出不进库/"
             f"选区自动保存/收藏提示/选到虚线/链接/无损导出+重名(2)/全大写转换都过；最小宽 {mw}px")
 
 

@@ -194,6 +194,77 @@ class Library:
         self.db.commit()
 
     # ---------- 扫描 ----------
+    # ---------- 扫描范围（1.3.2：导出文件夹不算媒体） ----------
+    def export_dirs(self) -> list[Path]:
+        """设置里的导出文件夹 + 默认的 根目录/导出（在媒体库里面的才有意义）。"""
+        out = [self.root / "导出"]
+        d = (self.get_setting("export_dir", "") or "").strip()
+        if d:
+            out.append(Path(d))
+        res = []
+        for x in out:
+            try:
+                x = x.resolve()
+            except Exception:
+                continue
+            if x != self.root.resolve():
+                res.append(x)
+        return res
+
+    def is_export_dir(self, d: Path, excl=None) -> bool:
+        """导出产生的文件夹：设置的导出文件夹、预设名文件夹（横屏原画无损 等）、带「说明」/manifest.json 的导出目录。"""
+        from .export import PRESETS
+        if d.name in PRESETS or d.name == "说明":
+            return True
+        if (d / "manifest.json").is_file() and (d / "说明").is_dir():
+            return True
+        if (d / "说明").is_dir() and any((d / p).is_dir() for p in PRESETS):
+            return True
+        try:
+            rd = d.resolve()
+        except Exception:
+            return False
+        return any(rd == x for x in (excl if excl is not None else self.export_dirs()))
+
+    def _walk_media(self):
+        import os
+        excl = self.export_dirs()
+        for cur, dirs, files in os.walk(self.root):
+            cp = Path(cur)
+            keep = []
+            for dn in dirs:
+                if dn.startswith(".") or dn == DATA_DIR:
+                    continue
+                if self.is_export_dir(cp / dn, excl):
+                    continue
+                keep.append(dn)
+            dirs[:] = sorted(keep)
+            for fn in files:
+                if not fn.startswith("."):
+                    yield cp / fn
+
+    def purge_excluded(self) -> int:
+        """把以前误扫进来的导出文件夹里的「集」去掉（不碰文件）。返回去掉了几集。"""
+        excl = self.export_dirs()
+        n = 0
+        for r in self.db.execute("SELECT id, rel_video, rel_sub FROM media").fetchall():
+            rel = r["rel_video"] or r["rel_sub"]
+            if not rel:
+                continue
+            parts = Path(rel).parts[:-1]
+            d = self.root
+            for part in parts:
+                d = d / part
+                if self.is_export_dir(d, excl):
+                    self._drop_media(r["id"]); n += 1
+                    break
+        if n:
+            self.db.commit()
+        return n
+
+    def snapshot(self) -> dict | None:
+        return self.get_setting("snapshot", None)
+
     def discover(self) -> dict[str, dict]:
         """找出所有「一集」。
 
@@ -204,9 +275,7 @@ class Library:
         """
         eps: dict[str, dict] = {}
         loose: dict[str, dict] = {}
-        for p in self.root.rglob("*"):
-            if DATA_DIR in p.parts or p.name.startswith(".") or not p.is_file():
-                continue
+        for p in self._walk_media():
             ext = p.suffix.lower()
             if ext not in VIDEO_EXT and ext not in SUB_EXT:
                 continue
@@ -314,6 +383,10 @@ class Library:
                     self.apply_alignment(r["id"], json.loads(f.read_text("utf-8")))
                 except Exception:
                     pass
+        # 1.3.2：这次扫描的结果就是新快照；以后打开软件直接用它，不再自动扫描
+        stats["total"] = self.db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+        self.set_setting("snapshot", dict(t=time.time(), total=stats["total"], new=stats["new"],
+                                          removed=stats["removed"]))
         return stats
 
     def reindex_all(self, progress=None):

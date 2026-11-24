@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
 
 from .. import tools
 from ..paths import VERSION, icon_path, ALIGN_UI
-from ..library import Library, JOIN_BASE, AUTO_BASE
+from ..library import Library, JOIN_BASE, AUTO_BASE, INDEX_VER
 from ..search import Searcher, Hit, TIER_ORIG, TIER_NEAR, TIER_FUNC, _tier_rank
 from ..export import Style, clip_name
 from .widgets import (WaveformView, DialogueMap, GroupHeader, ResultRow, fmt_ms, fmt_short, highlight_html,
@@ -160,9 +160,12 @@ class MainWindow(QMainWindow):
         bh = QHBoxLayout(box); bh.setContentsMargins(5, 3, 8, 3); bh.setSpacing(6)
         self.f_show = QComboBox(); self.f_show.setObjectName("scope")
         self.f_show.setToolTip("搜索范围：全部作品，或只搜一部")
-        self.f_show.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        # 1.3.2：宽度只跟着当前选中的名字走（不再按最长的作品名撑开），弹出列表照样显示全名
+        self.f_show.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.f_show.addItem("全部作品", "")
         self.f_show.currentIndexChanged.connect(lambda _: self.do_search() if self.q.text().strip() else None)
+        self.f_show.currentIndexChanged.connect(lambda _: self._fit_scope())
+        self._fit_scope()
         bh.addWidget(self.f_show)
         self.q = QLineEdit(); self.q.setObjectName("topsearch")
         self.q.setPlaceholderText("搜索台词或句型，例如 whose * is this")
@@ -255,7 +258,7 @@ class MainWindow(QMainWindow):
         sv.addWidget(self.root_lb)
         hb = QHBoxLayout(); hb.setSpacing(6)
         hb.addWidget(btn("选择", "folder", self.choose_root, tip="选择媒体库文件夹（Ctrl+O）"))
-        hb.addWidget(btn("扫描", "refresh", self.rescan, tip="重新扫描（F5）"))
+        hb.addWidget(btn("扫描", "refresh", self.rescan, tip="扫描媒体库并存为新快照（F5）。打开软件不会自动扫描"))
         hb.addStretch(1)
         sv.addLayout(hb)
         side.setMinimumWidth(170)
@@ -627,11 +630,11 @@ class MainWindow(QMainWindow):
         A = self.acts = {}
         fm = m.addMenu("文件")
         A["root"] = self._act("选择媒体库文件夹…", self.choose_root, "Ctrl+O", icon="folder")
-        A["rescan"] = self._act("重新扫描媒体库", self.rescan, "F5", icon="refresh")
+        A["rescan"] = self._act("扫描媒体库（存为新快照）", self.rescan, "F5", icon="refresh")
         A["open_root"] = self._act("在文件夹中打开媒体库", lambda: self.lib and QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self.lib.root))))
         A["open_exp"] = self._act("打开导出文件夹", self._open_export_dir)
-        A["settings"] = self._act("设置…", self.open_settings, "Ctrl+,", "常规 / 字幕样式" if not ALIGN_UI else "常规 / 对齐 / 字幕样式", icon="settings")
+        A["settings"] = self._act("设置…", self.open_settings, "Ctrl+,", "常规（ffmpeg、导出文件夹、句前句后余量）", icon="settings")
         A["quit"] = self._act("退出", self.close, "Ctrl+Q")
         for k in ("root", "rescan", "open_root", "open_exp", None, "settings", None, "quit"):
             fm.addSeparator() if k is None else fm.addAction(A[k])
@@ -817,9 +820,40 @@ class MainWindow(QMainWindow):
         self.acts["auto"].blockSignals(True)
         self.acts["auto"].setChecked(self.lib_settings()["auto_align"])
         self.acts["auto"].blockSignals(False)
+        # 1.3.2：媒体库快照。打开时直接用上次扫描存下的结果，不自动扫描；
+        # 只有第一次打开（还没有快照）或索引格式升级时才扫一遍。加了新视频请手动点「扫描」。
+        dropped = self.lib.purge_excluded()
         self.refresh_tree(); self.refresh_packs()
-        self.rescan()
-        self.rescan_timer.start()
+        need = (self.lib.snapshot() is None and not self.lib.db.execute("SELECT 1 FROM media LIMIT 1").fetchone()) \
+            or int(self.lib.get_setting("index_ver", 1) or 1) < INDEX_VER
+        if need:
+            self.rescan()
+        else:
+            self._show_snapshot(dropped)
+
+    def _fit_scope(self):
+        cb = self.f_show
+        fm = cb.fontMetrics()
+        full = cb.currentText() or "全部作品"
+        txt = fm.elidedText(full, Qt.ElideRight, 200)
+        if txt != full:
+            cb.setItemData(cb.currentIndex(), full, Qt.ToolTipRole)
+        cb.setToolTip(f"搜索范围：{full}（点一下换）")
+        cb.setFixedWidth(fm.horizontalAdvance(txt) + 44)
+        widest = max((fm.horizontalAdvance(cb.itemText(i)) for i in range(cb.count())), default=0)
+        cb.view().setMinimumWidth(min(widest + 48, 520))
+
+    def _show_snapshot(self, dropped=0):
+        snap = self.lib.snapshot() if self.lib else None
+        n = self.lib.db.execute("SELECT COUNT(*) FROM media").fetchone()[0] if self.lib else 0
+        if snap:
+            t = time.strftime("%Y-%m-%d %H:%M", time.localtime(snap["t"]))
+            txt = f"媒体库快照：{t}，共 {n} 集。加了新视频请点「扫描」更新快照（F5）"
+        else:
+            txt = f"共 {n} 集。加了新视频请点「扫描」更新快照（F5）"
+        if dropped:
+            txt += f"；已从库里去掉导出文件夹里的 {dropped} 项（文件没动）"
+        self.al_lb.setText(txt)
 
     def rescan(self):
         if not self.lib:
@@ -834,7 +868,8 @@ class MainWindow(QMainWindow):
         self._scan.start()
 
     def _scan_done(self, st):
-        self.al_lb.setText(f"扫描完成：共 {st['total']} 集，新增 {st['new']}，更新 {st['updated']}，移除 {st['removed']}")
+        self.al_lb.setText(f"扫描完成，已存为新快照（{time.strftime('%Y-%m-%d %H:%M')}）：共 {st['total']} 集，"
+                           f"新增 {st['new']}，更新 {st['updated']}，移除 {st['removed']}")
         self.refresh_tree()
         # 1.0.9：启动/重扫不再自动开跑。只有开了「入库后自动对齐」且这次扫到新视频，才把这些新集排队。
         if not ALIGN_UI:
@@ -873,6 +908,7 @@ class MainWindow(QMainWindow):
         i = self.f_show.findData(cur)
         self.f_show.setCurrentIndex(max(0, i))
         self.f_show.blockSignals(False)
+        self._fit_scope()
         for i in range(self.tree.topLevelItemCount()):
             t = self.tree.topLevelItem(i)
             if t.data(0, Qt.UserRole) in sel:
@@ -1903,6 +1939,8 @@ class MainWindow(QMainWindow):
                 self.lib.set_setting(k, v)
             from dataclasses import asdict
             self.lib.set_setting("style", asdict(dlg.style()))
+            if self.lib.purge_excluded():          # 1.3.2：新导出文件夹里的东西不算媒体
+                self.refresh_tree(); self._show_snapshot()
             self.acts["auto"].blockSignals(True)
             self.acts["auto"].setChecked(self.lib_settings()["auto_align"])
             self.acts["auto"].blockSignals(False)
