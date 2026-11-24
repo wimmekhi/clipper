@@ -219,6 +219,28 @@ def _ui_test_body():
     w.collect(w.cur); app.processEvents()
     assert w.toast.isVisible() and "收藏" in w.toast.text(), "收藏没有提示"
     w.reset_cut()
+    # 1.3.1：采集包重命名 / 删除（删除只动包，不动微调和文件）
+    from PySide6.QtWidgets import QInputDialog as _QID
+    _orig = _QID.getText
+    pid0 = w.pack_cb.currentData(); n_items = w.pack_list.count()
+    _QID.getText = staticmethod(lambda *a, **k: ("改名测试包", True))
+    try:
+        w.rename_pack()
+    finally:
+        _QID.getText = _orig
+    assert w.pack_cb.currentText() == "改名测试包" and w.pack_cb.currentData() == pid0 \
+        and w.pack_list.count() == n_items, "采集包重命名失败"
+    w.lib.pack_id("另一个包"); w.refresh_packs("改名测试包")
+    assert not w.lib.rename_pack(pid0, "另一个包"), "重名没拦住"
+    w.lib.save_adjust(w.cur.media_key, w.cur.idx, s0 + 0.05, e0)
+    w._test_confirm = False; w.delete_pack()
+    assert any(p["id"] == pid0 for p in w.lib.packs()), "点了取消却删了包"
+    w._test_confirm = True; w.delete_pack(); w._test_confirm = None
+    assert not any(p["id"] == pid0 for p in w.lib.packs()), "采集包没删掉"
+    assert not w.lib.db.execute("SELECT 1 FROM pack_items WHERE pack_id=?", (pid0,)).fetchone(), "包条目没清"
+    assert w.lib.final_span(w._cue_row(w.cur), w.cur.media_key)[2] == "manual", "删包误删了微调"
+    assert w.pack_cb.currentText() == "另一个包", "删包后没切到剩下的包"
+    w.reset_cut()
     from PySide6.QtCore import Qt as _Qt
     i0, i1 = w.script.item(0).data(_Qt.UserRole), w.script.item(1).data(_Qt.UserRole)
     w.pick_cue(i0); first = w.cur.idx
@@ -264,7 +286,7 @@ def _ui_test_body():
     mw = w.minimumSizeHint().width()
     assert mw <= 1000, f"主窗口最小宽度 {mw}px 太大"
     w.close(); app.processEvents()
-    return (f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、4 个页面；搜索/回车再搜/按匹配度/跨两行/剪辑页合并/"
+    return (f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、4 个页面；搜索/回车再搜/按匹配度/跨两行/剪辑页合并/采集包改名删除/"
             f"选区自动保存/收藏提示/选到虚线/链接/无损导出+重名(2)/全大写转换都过；最小宽 {mw}px")
 
 

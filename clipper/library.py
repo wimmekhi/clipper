@@ -549,6 +549,24 @@ class Library:
             self.db.execute("UPDATE pack_items SET pos=? WHERE id=?", (it["pos"], other["id"]))
             self.db.commit()
 
+    def rename_pack(self, pack_id: int, name: str) -> bool:
+        """改包名；新名字已被别的包用了就返回 False。"""
+        name = name.strip()
+        if not name:
+            return False
+        r = self.db.execute("SELECT id FROM packs WHERE name=?", (name,)).fetchone()
+        if r and r[0] != pack_id:
+            return False
+        self.db.execute("UPDATE packs SET name=? WHERE id=?", (name, pack_id))
+        self.db.commit()
+        return True
+
+    def delete_pack(self, pack_id: int):
+        """只删包和包里的条目引用；视频、字幕、微调、已导出的文件都不动。"""
+        self.db.execute("DELETE FROM pack_items WHERE pack_id=?", (pack_id,))
+        self.db.execute("DELETE FROM packs WHERE id=?", (pack_id,))
+        self.db.commit()
+
     def remove_item(self, item_id: int):
         self.db.execute("DELETE FROM pack_items WHERE id=?", (item_id,))
         self.db.commit()

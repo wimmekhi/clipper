@@ -538,6 +538,10 @@ class MainWindow(QMainWindow):
         self.pack_cb.currentIndexChanged.connect(lambda _: (self.load_pack(), self._sync_pack_buttons()))
         hd.addWidget(self.pack_cb)
         hd.addWidget(btn("新建", "newpack", self.new_pack, tip="Ctrl+N"))
+        self.b_pack_ren = btn("重命名", "edit", self.rename_pack, "ghost", "给当前采集包改名")
+        self.b_pack_del = btn("删除包", "trash", self.delete_pack, "ghost",
+                              "删除当前采集包（只删包，不碰视频和已导出的文件）")
+        hd.addWidget(self.b_pack_ren); hd.addWidget(self.b_pack_del)
         hd.addStretch(1)
         for t, fn in (("上移", lambda: self._pack_move(-1)), ("下移", lambda: self._pack_move(1)),
                       ("移除", self._pack_remove)):
@@ -587,6 +591,10 @@ class MainWindow(QMainWindow):
         m.addAction("新建采集包…", self.new_pack)
 
     def _sync_pack_buttons(self):
+        has = self.pack_cb.count() > 0
+        for b in (getattr(self, "b_pack_ren", None), getattr(self, "b_pack_del", None)):
+            if b is not None:
+                b.setEnabled(has)
         name = self.pack_cb.currentText() or "—"
         short = name if len(name) <= 16 else name[:15] + "…"
         for b in (getattr(self, "pack_btn_s", None), getattr(self, "pack_btn_w", None)):
@@ -662,11 +670,13 @@ class MainWindow(QMainWindow):
             a.triggered.connect(lambda _=False, i=i: self.speed.setCurrentIndex(i))
         pm = m.addMenu("采集包")
         A["new_pack"] = self._act("新建采集包…", self.new_pack, "Ctrl+N", icon="newpack")
+        A["rename_pack"] = self._act("重命名当前采集包…", self.rename_pack, icon="edit")
+        A["delete_pack"] = self._act("删除当前采集包…", self.delete_pack, icon="trash")
         A["pack_up"] = self._act("选中条目上移", lambda: self._pack_move(-1))
         A["pack_down"] = self._act("选中条目下移", lambda: self._pack_move(1))
         A["pack_rm"] = self._act("移除选中条目", self._pack_remove)
         A["export_pack"] = self._act("导出此包…", self.export_pack, "Ctrl+Shift+E", icon="package")
-        for k in ("new_pack", None, "pack_up", "pack_down", "pack_rm", None, "export_pack"):
+        for k in ("new_pack", "rename_pack", "delete_pack", None, "pack_up", "pack_down", "pack_rm", None, "export_pack"):
             pm.addSeparator() if k is None else pm.addAction(A[k])
         am = m.addMenu("对齐")
         A["align_center"] = self._act("对齐中心…", self.open_align_center, "Ctrl+L", "选集对齐、看进度和失败原因",
@@ -1726,6 +1736,44 @@ class MainWindow(QMainWindow):
         if ok and name.strip():
             self.lib.pack_id(name.strip())
             self.refresh_packs(name.strip())
+
+    def rename_pack(self):
+        pid = self.pack_cb.currentData()
+        if pid is None:
+            return
+        old = self.pack_cb.currentText()
+        name, ok = QInputDialog.getText(self, "重命名采集包", "新包名", text=old)
+        name = name.strip()
+        if not ok or not name or name == old:
+            return
+        if not self.lib.rename_pack(pid, name):
+            QMessageBox.warning(self, "重命名采集包", f"已经有叫「{name}」的采集包了，换个名字吧。")
+            return
+        self.refresh_packs(name)
+        self.toast.pop(f"已改名为「{name}」", True, "✓  ")
+
+    def delete_pack(self):
+        pid = self.pack_cb.currentData()
+        if pid is None:
+            return
+        name = self.pack_cb.currentText()
+        n = self.pack_list.count()
+        box = QMessageBox(QMessageBox.Warning, "删除采集包",
+                          f"确定删除采集包「{name}」吗？（里面有 {n} 条）",
+                          QMessageBox.NoButton, self)
+        box.setInformativeText("只删这个包和里面的条目列表，\n视频、字幕、选区和导出的文件都不动。\n删除后不能撤销。")
+        b_del = box.addButton("删除", QMessageBox.DestructiveRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(box.buttons()[-1])
+        if getattr(self, "_test_confirm", None) is not None:      # 自测用：不弹窗，直接给答案
+            yes = self._test_confirm
+        else:
+            box.exec(); yes = box.clickedButton() is b_del
+        if not yes:
+            return
+        self.lib.delete_pack(pid)
+        self.refresh_packs()
+        self.toast.pop(f"已删除采集包「{name}」", True, "✓  ")
 
     def collect(self, h):
         self._flush_cut()          # 先把调好的选区存下来，包里导出时按它切

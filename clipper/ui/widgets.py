@@ -932,9 +932,9 @@ class Toast(QLabel):
         self.timer = QTimer(self, singleShot=True, interval=1400, timeout=self._out)
         self.hide()
 
-    def pop(self, text, ok=True):
+    def pop(self, text, ok=True, mark=None):
         color, bg = ("#FFFFFF", "rgba(15,118,110,0.94)") if ok else ("#0F172A", "rgba(254,243,199,0.97)")
-        star = "★  " if ok else "☆  "
+        star = mark if mark is not None else ("★  " if ok else "☆  ")
         self.setText(star + text)
         self.setStyleSheet(f"QLabel{{color:{color};background:{bg};border-radius:18px;padding:9px 22px;"
                            f"font-size:14px;font-weight:600;}}")
