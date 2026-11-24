@@ -168,7 +168,7 @@ class ExportWorker(QThread):
                         (spec["media_key"], spec["idx"])).fetchone()
                     if row:
                         items.append(dict(row=row, pattern=spec.get("pattern", ""), tier=spec.get("tier", ""),
-                                          matched=spec.get("matched", "")))
+                                          matched=spec.get("matched", ""), name=spec.get("name", "")))
             r = jobs.export_items(lib, items, self.out_dir, self.presets, self.style,
                                   progress=lambda n, t, s: self.progress.emit(n, t, s),
                                   make_compilation=self.make_comp, cancel=lambda: self._cancel)

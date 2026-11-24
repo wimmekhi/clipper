@@ -787,7 +787,7 @@ class ResultRow(QFrame):
     link = Signal(object)
     checked = Signal(object, bool)
 
-    def __init__(self, hit, timing: str, span, parent=None):
+    def __init__(self, hit, timing: str, span, parent=None, show_source=False):
         super().__init__(parent)
         from .theme import icon
         from PySide6.QtWidgets import QCheckBox
@@ -801,15 +801,19 @@ class ResultRow(QFrame):
         h.addWidget(self.cb, 0, Qt.AlignTop)
         v = QVBoxLayout(); v.setSpacing(2); v.setContentsMargins(0, 0, 0, 0)
         self.en = QLabel(highlight_html(hit.en, hit.matched)); self.en.setWordWrap(True)
-        self.en.setStyleSheet("font-size:14px;" + ("font-style:italic;color:#7C3AED;" if hit.src == "auto" else ""))
+        # 1.2.0：底下留 3px，免得 y / g / p 的下伸部被切掉（Mac 上粗体高亮时最明显）
+        self.en.setStyleSheet("font-size:14px;padding:1px 0 3px 0;" +
+                              ("font-style:italic;color:#7C3AED;" if hit.src == "auto" else ""))
         v.addWidget(self.en)
         if hit.zh:
             zh = QLabel(html.escape(hit.zh)); zh.setWordWrap(True)
-            zh.setStyleSheet("font-size:12px;color:#64748B;"); v.addWidget(zh)
+            zh.setStyleSheet("font-size:12px;color:#64748B;padding-bottom:2px;"); v.addWidget(zh)
         meta = QHBoxLayout(); meta.setSpacing(6)
         tm = QLabel(f"{fmt_ms(span[0])} – {fmt_ms(span[1])}")
         tm.setStyleSheet(f"color:#0F766E;font-family:{MONO};font-size:11px;")
         meta.addWidget(tm)
+        if show_source:
+            meta.addWidget(tag(hit.label, "#0F766E"))
         tt, tc = TIMING_TEXT.get(timing, ("", "#999"))
         meta.addWidget(tag(hit.tier, TIER_COLOR.get(hit.tier, "#64748B")))
         meta.addWidget(tag(tt, tc))

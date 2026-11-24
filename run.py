@@ -145,16 +145,32 @@ def _ui_test():
     need = ["文件", "搜索", "片段", "采集包", "对齐", "窗口", "帮助"]
     assert all(m in menus for m in need), f"菜单缺：{menus}"
     tb = w.findChild(QToolBar, "toolbar_main")
-    assert tb and len(tb.actions()) >= 10 and len(w.nav) == 5, "顶栏缺"
+    assert tb and len(tb.actions()) >= 9 and len(w.nav) == 5, "顶栏缺"
     assert w.upd_btn.isVisible() and w.upd_btn.text() == "检查更新", "顶栏没有一键更新按钮"
     w._mark_update({"version": "99.0.0", "url": "https://example.invalid/x.zip", "size": 1})
     assert w.upd_btn.text() == "更新到 99.0.0" and w.upd_btn.property("hot") == "true", "更新按钮没点亮"
     w._mark_update(None)
     assert "batchbar" in app.styleSheet(), "主题没生效"
     assert w.eps.topLevelItemCount() == 1, "媒体库页没列出集"
+    from clipper.paths import ALIGN_UI
+    assert ALIGN_UI or not w.top_align.isVisible(), "1.2 起顶栏不该有对齐中心"
     # 搜索：普通 + 跨两行
     w.q.setText("whose turn"); w.do_search(); app.processEvents()
     assert w.stack.currentIndex() == P_SEARCH and w.hits and w.rows, "搜索没出结果"
+    # 1.2.0：已有结果时在搜索框里按回车再搜（以前被工作台的 Enter 快捷键吃掉）
+    from PySide6.QtTest import QTest
+    from PySide6.QtCore import Qt as _Q
+    w.activateWindow(); w.focus_search(); app.processEvents()
+    w._focus_changed(None, w.q)
+    QTest.keyClicks(w.q, "...you are doing..."); QTest.keyClick(w.q, _Q.Key_Return); app.processEvents()
+    assert w.hits and all("doing" in h.en for h in w.hits), f"搜索框回车第二次搜没反应：{[h.en for h in w.hits]}"
+    # 默认只按匹配度：一列、没有分组头
+    assert w.c_rank.isChecked() and not w.group_items, "默认应只按匹配度排、不分组"
+    sc = [h.score for h in w.sorted_hits()]
+    assert sc == sorted(sc, reverse=True), "没按匹配度排"
+    w.c_rank.setChecked(False); app.processEvents()
+    assert w.group_items, "关掉只按匹配度后应按集分组"
+    w.c_rank.setChecked(True); w.c_ted.setChecked(True); app.processEvents(); w.c_ted.setChecked(False)
     w.c_order.setChecked(True)
     w.q.setText("know what you are doing"); w.do_search(); app.processEvents()
     assert any(h.src == "join" for h in w.hits), f"跨两行的句子没搜到：{[(h.en, h.src) for h in w.hits]}"
@@ -188,6 +204,27 @@ def _ui_test():
     w.pick_cue(i1, extend=True)
     assert w.cur.idx == first == i0 and w.cur_span[1] > e_first + 0.3, "Shift 加选没把选区扩到下一句"
     w.audition_in(); w.audition_out(); w.player.stop()
+    # 1.2.0：选到虚线（原字幕时间）
+    w.select_sub()
+    assert w.cur_span == tuple(w.wave.sub) and w.wave.cut == w.cur_span, "选到虚线没生效"
+    w.reset_cut()
+    # 1.2.0：导出文件名 = 英文台词，默认原画无损
+    from clipper import jobs
+    from clipper.export import clip_name
+    from clipper.ui.dialogs import ExportDialog
+    assert clip_name('Is this your sock?') == "Is this your sock", clip_name('Is this your sock?')
+    dlg = ExportDialog("x", 1, root, w, name=clip_name(w.cur.en))
+    assert dlg.presets() == ["横屏原画无损"] and dlg.name() == clip_name(w.cur.en), f"导出框默认不对：{dlg.presets()}"
+    dlg.deleteLater()
+    xr = w.lib.db.execute("SELECT c.*, m.key media_key, m.show, m.season, m.episode, m.kind, m.rel_video FROM cues c "
+                          "JOIN media m ON m.id=c.media_id WHERE c.idx=?", (w.cur.idx,)).fetchone()
+    od = __import__("pathlib").Path(root) / "导出测试"
+    for _ in range(2):
+        r = jobs.export_items(w.lib, [dict(row=xr)], od, ["横屏原画无损"], w.style())
+        assert r["ok"], r
+    names = sorted(f.name for f in (od / "横屏原画无损").iterdir())
+    want = clip_name(xr["en"])
+    assert names == [f"{want} (2).mp4", f"{want}.mp4"], f"导出文件名不对：{names}"
     # 片段链接
     link = w.link_of(w.cur)
     w.q.setText(link); w.do_search(); app.processEvents()
@@ -201,7 +238,8 @@ def _ui_test():
     mw = w.minimumSizeHint().width()
     assert mw <= 1000, f"主窗口最小宽度 {mw}px 太大"
     w.close(); app.processEvents()
-    return f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、5 个页面；搜索/跨两行/工作台/链接/无损导出都过；最小宽 {mw}px"
+    return (f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、5 个页面；搜索/回车再搜/按匹配度/跨两行/工作台/选到虚线/"
+            f"链接/无损导出+字幕命名都过；最小宽 {mw}px")
 
 
 def selftest(out, smoke_wav=None):

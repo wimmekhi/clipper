@@ -240,6 +240,27 @@ def concat(files: list[Path], out: Path) -> Path:
     return out
 
 
+def clip_name(en: str, limit: int = 80) -> str:
+    """导出文件名 = 片段的英文字幕（去掉标签和文件名里不能用的字符），例如 Is this your sock"""
+    s = re.sub(r"<[^>]*>|\{[^}]*\}", "", en or "")
+    s = s.replace("\\N", " ").replace("\n", " ").replace("’", "'")
+    s = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", s)
+    s = re.sub(r"\s+", " ", s).strip(" .-")
+    if len(s) > limit:
+        s = s[:limit].rsplit(" ", 1)[0].rstrip(" .,-") or s[:limit]
+    return s or "clip"
+
+
+def unique_path(f: Path) -> Path:
+    if not f.exists():
+        return f
+    for n in range(2, 1000):
+        g = f.with_name(f"{f.stem} ({n}){f.suffix}")
+        if not g.exists():
+            return g
+    return f
+
+
 def safe_name(s: str) -> str:
     s = re.sub(r'[\\/:*?"<>|]+', " ", s).strip()
     return re.sub(r"\s+", "_", s)[:60]

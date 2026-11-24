@@ -92,7 +92,9 @@ class SettingsDialog(QDialog):
         fa.addRow("对齐性能上限", self.limit)
         fa.addRow(QLabel("限制对齐时占用的 GPU/CPU，机器不那么烫，代价是对齐变慢（例如 50% 约慢一倍）。\n"
                          "只对这台电脑生效；对齐中途改也会马上生效。"))
-        tabs.addTab(a, "对齐")
+        from ..paths import ALIGN_UI
+        if ALIGN_UI:      # 1.2.0 起不再对齐
+            tabs.addTab(a, "对齐")
         # ---- 字幕样式 ----
         s = QWidget(); hs = QHBoxLayout(s)
         left = QWidget(); fs = QFormLayout(left)
@@ -185,7 +187,7 @@ class SettingsDialog(QDialog):
 
 
 class ExportDialog(QDialog):
-    def __init__(self, title: str, count: int, default_dir: str, parent=None):
+    def __init__(self, title: str, count: int, default_dir: str, parent=None, name: str | None = None):
         super().__init__(parent)
         self.setWindowTitle("导出")
         v = QVBoxLayout(self)
@@ -197,8 +199,16 @@ class ExportDialog(QDialog):
             lossless = PRESETS[p].get("lossless")
             c = QCheckBox(p + ("（不重新编码，几乎瞬间出片；起点落在前一个关键帧，可能早零点几秒；不参与合集）"
                                if lossless else ""))
-            c.setChecked(not lossless); bl.addWidget(c); self.checks[p] = c
+            c.setChecked(bool(lossless)); bl.addWidget(c); self.checks[p] = c   # 1.2.0：默认只勾原画无损
         v.addWidget(box)
+        self.name_ed = None
+        if name is not None:
+            nr = QHBoxLayout()
+            self.name_ed = QLineEdit(name); self.name_ed.setToolTip("默认用这句的英文台词，可以改")
+            nr.addWidget(QLabel("文件名")); nr.addWidget(self.name_ed, 1)
+            v.addLayout(nr)
+        else:
+            v.addWidget(QLabel("文件名：序号 + 英文台词，例如「001 Is this your sock.mp4」"))
         self.comp = QCheckBox("同时拼成合集长视频（每个版本一条）"); self.comp.setChecked(count >= 2)
         self.comp.setEnabled(count >= 2)
         v.addWidget(self.comp)
@@ -219,6 +229,9 @@ class ExportDialog(QDialog):
         p = QFileDialog.getExistingDirectory(self, "选择导出文件夹", self.dir.text())
         if p:
             self.dir.setText(p)
+
+    def name(self) -> str:
+        return self.name_ed.text().strip() if self.name_ed is not None else ""
 
     def presets(self):
         return [p for p, c in self.checks.items() if c.isChecked()]
