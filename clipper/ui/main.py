@@ -221,7 +221,7 @@ class MainWindow(QMainWindow):
         self.player.setAudioOutput(self.audio)
         # 1.2.0：中途连上 / 断开 AirPods 等，跟着系统当前的默认输出走（以前只认启动时那个设备）
         self.media_devices = QMediaDevices(self)
-        self.media_devices.audioOutputsChanged.connect(self._sync_audio_device)
+        self.media_devices.audioOutputsChanged.connect(lambda: QTimer.singleShot(300, self._sync_audio_device))
         self.player.positionChanged.connect(self._on_pos)
         self.player.mediaStatusChanged.connect(self._on_status)
         self.stack.addWidget(self._page_library())
@@ -1590,17 +1590,24 @@ class MainWindow(QMainWindow):
             self.play_clip()
 
     def _sync_audio_device(self):
+        """系统的音频输出变了（连上 / 断开 AirPods 等）：换一个跟着新默认设备的 QAudioOutput。
+        只在设备列表变化时做；不在每次播放时去动设备（Mac 上播放中 setDevice 可能卡死）。"""
         try:
             dev = QMediaDevices.defaultAudioOutput()
-            if not dev.isNull() and dev.id() != self.audio.device().id():
-                self.audio.setDevice(dev)
+            if dev.isNull() or dev.id() == self.audio.device().id():
+                return
+            vol, muted = self.audio.volume(), self.audio.isMuted()
+            old = self.audio
+            self.audio = QAudioOutput(dev, self)
+            self.audio.setVolume(vol); self.audio.setMuted(muted)
+            self.player.setAudioOutput(self.audio)
+            old.deleteLater()
         except Exception:   # noqa
             pass
 
     def play_range(self, a, b):
         if not self.cur or not self.cur.has_video:
             return
-        self._sync_audio_device()
         self._stop_at = b
         self.player.setPosition(int(max(0.0, a) * 1000))
         self.player.setPlaybackRate(self.speed.currentData())
@@ -1622,7 +1629,6 @@ class MainWindow(QMainWindow):
 
     def _play_from(self, t):
         self._stop_at = None
-        self._sync_audio_device()
         self.player.setPosition(int(t * 1000))
         self.player.play()
 
@@ -1633,7 +1639,6 @@ class MainWindow(QMainWindow):
             pos = self.player.position() / 1000
             if self.cur_span[0] <= pos < self.cur_span[1] - 0.05:
                 self._stop_at = self.cur_span[1]
-                self._sync_audio_device()
                 self.player.play()
             else:
                 self.play_clip()

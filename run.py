@@ -108,6 +108,16 @@ def _faster_smoke(chk, smoke_wav=None):
 
 
 def _ui_test():
+    # CI 上万一卡住：4 分钟后把所有线程的调用栈打到 stderr 并退出，方便定位
+    import faulthandler
+    faulthandler.dump_traceback_later(240, exit=True)
+    try:
+        return _ui_test_body()
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+def _ui_test_body():
     """真把主窗口开起来：临时媒体库（1 集，字幕里有一句拆成两行）→ 扫描 → 手动排队/取消 → 对齐中心 →
     菜单 / 顶栏 / 五个页面 → 搜索（含跨两行）→ 工作台（切点、I/O、吸附、试听）→ 片段链接 → 无损导出 → 最小宽度。"""
     import tempfile, subprocess, time
