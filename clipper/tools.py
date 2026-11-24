@@ -93,3 +93,43 @@ def video_size(path) -> tuple[int, int]:
                 w = int(round(w * int(sar.group(1)) / int(sar.group(2))))
             return w, h
     raise RuntimeError("读不出视频尺寸：" + r.stderr.strip()[-200:])
+
+
+_info_cache: dict = {}
+
+
+def media_info(path) -> dict:
+    """只用 ffmpeg 读码率：vkbps（视频）、akbps（音频）。读不到的项为 0。按路径+大小+修改时间缓存。"""
+    import re
+    try:
+        st = os.stat(path); key = (str(path), st.st_size, st.st_mtime)
+    except OSError:
+        key = (str(path), 0, 0)
+    if key in _info_cache:
+        return _info_cache[key]
+    r = run([ffmpeg(), "-hide_banner", "-i", str(path)])
+    total = vk = ak = 0
+    dur = 0.0
+    for line in r.stderr.splitlines():
+        m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", line)
+        if m:
+            dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        m = re.search(r"bitrate: (\d+) kb/s", line)
+        if m and "Duration" in line:
+            total = int(m.group(1))
+        if "Stream #" in line:
+            b = re.search(r"(\d+) kb/s", line)
+            if "Video:" in line and b and not vk:
+                vk = int(b.group(1))
+            elif "Audio:" in line and b and not ak:
+                ak = int(b.group(1))
+    if not total and dur > 0:
+        try:
+            total = int(os.path.getsize(path) * 8 / dur / 1000)
+        except OSError:
+            pass
+    if not vk and total:
+        vk = max(0, total - (ak or 128))
+    res = dict(vkbps=vk, akbps=ak, total=total)
+    _info_cache[key] = res
+    return res

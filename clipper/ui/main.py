@@ -225,6 +225,7 @@ class MainWindow(QMainWindow):
         self.media_devices = QMediaDevices(self)
         self.media_devices.audioOutputsChanged.connect(lambda: QTimer.singleShot(300, self._sync_audio_device))
         self.player.positionChanged.connect(self._on_pos)
+        self.player.playbackStateChanged.connect(lambda _st: self._on_pos(self.player.position()))
         self.player.mediaStatusChanged.connect(self._on_status)
         self.stack.addWidget(self._page_library())
         self.stack.addWidget(self._page_search())
@@ -438,10 +439,6 @@ class MainWindow(QMainWindow):
         self.ws_sub.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         tv.addWidget(self.ws_sub)
         hd.addLayout(tv, 1)
-        self.pack_btn_w = self._pack_button()
-        hd.addWidget(self.pack_btn_w, 0, Qt.AlignVCenter)
-        self.b_fav = btn("收藏", "star", lambda: self._cur_do(self.collect), tip="收藏到当前采集包（Ctrl+D）")
-        hd.addWidget(self.b_fav, 0, Qt.AlignVCenter)
         hd.addWidget(btn("复制链接", "link", lambda: self._cur_do(self.copy_link)), 0, Qt.AlignVCenter)
         hd.addWidget(btn("导出片段", "scissors", lambda: self._cur_do(self.export_one), "primary",
                          "Ctrl+E"), 0, Qt.AlignVCenter)
@@ -507,6 +504,16 @@ class MainWindow(QMainWindow):
         r2.addWidget(btn("选到虚线", "fit", self.select_sub,
                          tip="选区一键定到两条虚线之间（原字幕时间）（U）"))
         r2.addWidget(btn("恢复自动", None, self.reset_cut, "ghost", "选区改回软件算的切点"))
+        # 1.3.3：收藏挪到选区这排：收藏到哪个包 · 包里几条 · 收藏
+        r2.addWidget(label("　", "eyebrow"))
+        self.pack_btn_w = self._pack_button()
+        r2.addWidget(self.pack_btn_w)
+        self.pack_n_lb = label("0 条", "muted"); self.pack_n_lb.setToolTip("当前采集包里已有几条")
+        self.b_fav = btn("收藏", "star", lambda: self._cur_do(self.collect), tip="收藏到当前采集包（Ctrl+D）")
+        self.pack_n_lb.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.pack_n_lb.setFixedHeight(self.b_fav.sizeHint().height())
+        r2.addWidget(self.pack_n_lb)
+        r2.addWidget(self.b_fav)
         ev.addLayout(r2)
         self.wave = WaveformView()
         self.wave.changed.connect(self._cut_changed)
@@ -1681,7 +1688,8 @@ class MainWindow(QMainWindow):
 
     def _on_pos(self, ms):
         t = ms / 1000
-        self.wave.set_playhead(t)
+        self.wave.set_playhead(t, self.player.playbackState() == QMediaPlayer.PlayingState,
+                               self.player.playbackRate())
         self.dmap.set_playhead(t)
         if self.c_follow.isChecked() and self._script_starts and self.player.playbackState() == QMediaPlayer.PlayingState:
             k = bisect.bisect_right(self._script_starts, t + 0.05) - 1
@@ -1830,6 +1838,7 @@ class MainWindow(QMainWindow):
         self.pack_list.clear()
         pid = self.pack_cb.currentData()
         if pid is None or not self.lib:
+            self._sync_pack_count()
             return
         for r in self.lib.pack_items(pid):
             lb = f"{r['show']} S{r['season']:02d}E{r['episode']:02d}" if r["kind"] == "tv" else r["show"]
@@ -1837,6 +1846,13 @@ class MainWindow(QMainWindow):
             it.setData(Qt.UserRole, r["id"])
             it.setData(Qt.UserRole + 1, (r["media_key"], r["idx"]))
             self.pack_list.addItem(it)
+        self._sync_pack_count()
+
+    def _sync_pack_count(self):
+        lb = getattr(self, "pack_n_lb", None)
+        if lb is not None:
+            n = self.pack_list.count() if self.pack_cb.currentData() is not None else 0
+            lb.setText(f"{n} 条")
 
     def _pack_move(self, d):
         it = self.pack_list.currentItem()

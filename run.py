@@ -277,16 +277,16 @@ def _ui_test_body():
         _ww.wait(60000)
     app.processEvents()
     dlg = ExportDialog("x", 1, root, w, name=clip_name(w.cur.en))
-    assert dlg.presets() == ["横屏原画无损"] and dlg.name() == clip_name(w.cur.en), f"导出框默认不对：{dlg.presets()}"
+    assert dlg.presets() == ["横屏原画精确"] and dlg.name() == clip_name(w.cur.en), f"导出框默认不对：{dlg.presets()}"
     dlg.deleteLater()
     xr = w.lib.db.execute("SELECT c.*, m.key media_key, m.show, m.season, m.episode, m.kind, m.rel_video FROM cues c "
                           "JOIN media m ON m.id=c.media_id WHERE c.idx=?", (w.cur.idx,)).fetchone()
     od = __import__("pathlib").Path(root) / "导出测试"
     for _ in range(2):
-        r = jobs.export_items(w.lib, [dict(row=xr)], od, ["横屏原画无损"], w.style())
+        r = jobs.export_items(w.lib, [dict(row=xr)], od, ["横屏原画精确"], w.style())
         assert r["ok"], r
-    r = jobs.export_items(w.lib, [dict(row=xr), dict(row=xr)], od, ["横屏原画无损"], w.style(), make_compilation=False)
-    names = sorted(f.name for f in (od / "横屏原画无损").iterdir())
+    r = jobs.export_items(w.lib, [dict(row=xr), dict(row=xr)], od, ["横屏原画精确"], w.style(), make_compilation=False)
+    names = sorted(f.name for f in (od / "横屏原画精确").iterdir())
     want = clip_name(xr["en"])
     assert names == sorted([f"{want}.mp4"] + [f"{want} ({k}).mp4" for k in (2, 3, 4)]), f"导出文件名不对：{names}"
     from clipper.subs import clean_en
@@ -300,13 +300,27 @@ def _ui_test_body():
     out = os.path.join(root, "x.mp4")
     export.export_lossless(vid, 1.0, 2.5, __import__("pathlib").Path(out))
     assert os.path.getsize(out) > 1000, "无损导出失败"
+    # 1.3.3：精确剪切，时长和选区一致（无损会退到关键帧）
+    outp = __import__("pathlib").Path(root) / "p.mp4"
+    export.export_precise(vid, 1.0, 2.5, outp)
+    import re as _re
+    _d = _re.search(r"Duration: (\d+):(\d+):([\d.]+)", tools.run([tools.ffmpeg(), "-hide_banner", "-i", str(outp)]).stderr)
+    _dur = float(_d.group(3)) + int(_d.group(2)) * 60
+    assert abs(_dur - 1.5) < 0.12, f"精确剪切时长不对：{_dur}"
+    # 1.3.3：收藏在选区那排，前面显示包里条数
+    assert w.pack_n_lb.text() == f"{w.pack_list.count()} 条", w.pack_n_lb.text()
+    # 1.3.3：波形缓存——播放头移动不重建缓存
+    w.wave.update(); w.wave.repaint(); _k = w.wave._cache[0] if w.wave._cache else None
+    w.wave.set_playhead((w.wave.v0 + w.wave.v1) / 2, True, 1.0); w.wave.repaint()
+    assert _k is not None and w.wave._cache[0] == _k, "播放头移动重建了波形缓存"
+    w.wave.set_playhead(None)
     for i in range(4):
         w.goto(i); app.processEvents()
     mw = w.minimumSizeHint().width()
     assert mw <= 1000, f"主窗口最小宽度 {mw}px 太大"
     w.close(); app.processEvents()
     return (f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、4 个页面；搜索/回车再搜/按匹配度/跨两行/剪辑页合并/采集包改名删除/快照不自动扫描+导出不进库/"
-            f"选区自动保存/收藏提示/选到虚线/链接/无损导出+重名(2)/全大写转换都过；最小宽 {mw}px")
+            f"选区自动保存/收藏提示/选到虚线/链接/精确剪切+重名(2)/收藏条数/波形缓存/全大写转换都过；最小宽 {mw}px")
 
 
 def selftest(out, smoke_wav=None):

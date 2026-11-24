@@ -19,13 +19,37 @@ PRESETS = {
     "竖屏无字幕": dict(w=720, h=1280, burn=False, vertical=True),
     # 不重新编码，直接拷原片的画面和声音：几乎瞬间出片、画质无损；起点会落在前一个关键帧上（可能早零点几秒）
     "横屏原画无损": dict(w=0, h=0, burn=False, vertical=False, lossless=True),
+    # 1.3.3：精确剪切。只把这一小段重新编码（同分辨率、同帧率、码率跟原片差不多），起止和选区完全一致
+    "横屏原画精确": dict(w=0, h=0, burn=False, vertical=False, precise=True),
 }
+DEFAULT_PRESET = "横屏原画精确"
 
 
 def out_ext(preset: str, video: Path) -> str:
+    if PRESETS[preset].get("precise"):
+        return ".mp4"
     if PRESETS[preset].get("lossless"):
         return ".mkv" if Path(video).suffix.lower() in (".mkv", ".webm", ".avi") else ".mp4"
     return ".mp4"
+
+
+def export_precise(video: Path, start: float, end: float, out: Path) -> Path:
+    """精确剪切：输入端 -ss 定位后逐帧解码，起止落在选区上；H.264 码率封顶为原片视频码率，AAC 按原片音频码率。"""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    info = tools.media_info(video)
+    vk = int(info.get("vkbps") or 0) or 1200
+    vk = max(300, min(vk, 20000))
+    ak = int(info.get("akbps") or 0) or 128
+    ak = max(64, min(ak, 320))
+    cmd = [tools.ffmpeg(), "-nostdin", "-y", "-v", "error", "-ss", f"{start:.3f}", "-i", str(Path(video).resolve()),
+           "-t", f"{max(0.2, end - start):.3f}", "-map", "0:v:0", "-map", "0:a:0?",
+           "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-maxrate", f"{vk}k", "-bufsize", f"{vk * 2}k",
+           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", f"{ak}k",
+           "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-movflags", "+faststart", str(out)]
+    r = tools.run(cmd)
+    if r.returncode:
+        raise RuntimeError(r.stderr.strip()[-600:])
+    return out
 
 
 def export_lossless(video: Path, start: float, end: float, out: Path) -> Path:
@@ -182,6 +206,8 @@ def export_clip(video: Path, start: float, end: float, out: Path, preset: str, s
                 src_w=None, src_h=None) -> Path:
     """start/end 已经是最终切点（含余量）。"""
     p = PRESETS[preset]
+    if p.get("precise"):
+        return export_precise(video, start, end, out)
     if p.get("lossless"):
         return export_lossless(video, start, end, out)
     pad = pad or Padding()

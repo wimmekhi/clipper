@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 # 1.2.0：所有集已对齐完，界面里去掉对齐功能（要对齐请用 1.1.0 及以前的版本）。对齐数据照常使用。
 ALIGN_UI = False
 # 1.3.2：视频都是压好的 480p，只用「横屏原画无损」导出；重新编码的三种版本、字幕样式、合集从界面拿掉（代码保留）

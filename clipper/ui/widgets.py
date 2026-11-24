@@ -6,8 +6,8 @@ import re
 
 import numpy as np
 
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QRect, QPoint, QSize
-from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath, QBrush
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QRect, QPoint, QSize, QTimer, QElapsedTimer, QEvent
+from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath, QBrush, QImage, QPixmap
 from PySide6.QtWidgets import (QLayout, QWidget, QLabel, QHBoxLayout, QVBoxLayout, QPushButton, QFrame,
                                QSizePolicy, QStyledItemDelegate)
 
@@ -339,7 +339,10 @@ class WaveformView(QWidget):
     中间波形 + 选区（两端拖动），下面识别出的词和时间刻度。
 
     吸附（按住 Alt / Option 临时不吸附）：词边界、字幕边、静音点、过零点，可分别开关。
-    操作：拖两端改切点；在空白处拖出新选区；单击跳到那里播放；滚轮平移，Ctrl/⌘+滚轮缩放。"""
+    操作：拖两端改切点；在空白处拖出新选区；单击跳到那里播放；滚轮 / 触控板平移，Ctrl/⌘+滚轮或双指捏合缩放。
+
+    1.3.3：静态部分（台词条、波形、词、刻度）按视图缓存成两张位图（灰 / 青），拖手柄、播放头移动只重画选区和线；
+    波形包络用 numpy 一次算出；播放时播放头按 60 帧插值平滑走；触控板按像素增量平滑平移 / 缩放。"""
     changed = Signal(float, float)
     seek = Signal(float)
     pick_line = Signal(int, bool)       # idx, extend
@@ -352,6 +355,7 @@ class WaveformView(QWidget):
         self.setMinimumHeight(104)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.ClickFocus)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, False)
         self.t0, self.t1 = 0.0, 1.0      # 已加载的音频范围
         self.v0, self.v1 = 0.0, 1.0      # 当前可见范围
         self.samples = None
@@ -365,6 +369,11 @@ class WaveformView(QWidget):
         self.snap = {"word", "cue", "silence"}
         self._drag = None                # 0/1 拖手柄，"new" 拖新选区，"pan"
         self._press = None
+        self._cache = None               # (key, 灰底图, 青色波形图)
+        self._gen = 0                    # 数据版本，变了就重建缓存
+        # 播放头插值
+        self._ph_base = None; self._ph_rate = 1.0; self._ph_clock = QElapsedTimer()
+        self._ph_timer = QTimer(self); self._ph_timer.setInterval(16); self._ph_timer.timeout.connect(self._ph_tick)
 
     # ---------------- 数据
     def set_data(self, t0, t1, words, lines, sub, cut):
@@ -373,6 +382,7 @@ class WaveformView(QWidget):
         self.lines = [l for l in lines if l[1] >= t0 and l[0] <= t1]
         self.sub, self.cut = sub, cut
         self.samples = None
+        self._gen += 1
         self.fit_selection(emit=False)
         self.update()
 
@@ -380,18 +390,44 @@ class WaveformView(QWidget):
         self.samples, self.s_t0, self.sr = arr, t_start, sr
         self._norm = float(np.abs(arr).max()) if arr is not None and len(arr) else 1.0
         self._norm = self._norm or 1.0
+        self._gen += 1
         self.update()
 
     def set_cut(self, cut):
         self.cut = cut
         self.update()
 
-    def set_playhead(self, t):
+    def set_playhead(self, t, playing=False, rate=1.0):
+        """播放器报的位置。playing=True 时在两次报位之间按时钟插值，播放头匀速走。"""
+        if t is not None and playing:
+            self._ph_base, self._ph_rate = t, rate or 1.0
+            self._ph_clock.restart()
+            if not self._ph_timer.isActive():
+                self._ph_timer.start()
+        else:
+            self._ph_timer.stop(); self._ph_base = None
+        self._move_playhead(t)
+
+    def _ph_tick(self):
+        if self._ph_base is None:
+            self._ph_timer.stop(); return
+        el = self._ph_clock.elapsed() / 1000
+        if el > 0.5:                      # 太久没报位（卡住 / 暂停没通知），别乱跑
+            return
+        self._move_playhead(self._ph_base + el * self._ph_rate)
+
+    def _move_playhead(self, t):
+        old = self.playhead
         self.playhead = t
-        if t is not None and self.cut and (t > self.v1 or t < self.v0) and self.t0 <= t <= self.t1:
+        if t is not None and self.cut and (t > self.v1 or t < self.v0) and self.t0 <= t <= self.t1 and self._drag is None:
             w = self.v1 - self.v0
             self._set_view(t - w * 0.1, t + w * 0.9)
-        self.update()
+            return
+        # 只重画播放头新旧位置附近
+        H = self.height()
+        for x in {self.x_of(v) for v in (old, t) if v is not None}:
+            if -4 <= x <= self.width() + 4:
+                self.update(QRect(int(x) - 3, 0, 7, H))
 
     # ---------------- 视图
     def span(self):
@@ -400,6 +436,8 @@ class WaveformView(QWidget):
     def _set_view(self, a, b, emit=True):
         w = max(0.02, min(b - a, self.t1 - self.t0))
         a = max(self.t0, min(a, self.t1 - w))
+        if abs(a - self.v0) < 1e-9 and abs(a + w - self.v1) < 1e-9:
+            return
         self.v0, self.v1 = a, a + w
         self.update()
         if emit:
@@ -436,18 +474,38 @@ class WaveformView(QWidget):
         return top, bottom
 
     # ---------------- 绘制
-    def paintEvent(self, ev):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+    def _envelope(self, W, top, bottom):
+        """每个物理像素列的振幅（0..1），numpy 一次算完。返回 None 表示该用连线画法。"""
+        a = self.samples
+        i0 = (self.v0 - self.s_t0) * self.sr
+        per = self.span() * self.sr / max(1, W)
+        if per < 1.5:
+            return None
+        edges = (i0 + np.arange(W + 1) * per).astype(np.int64)
+        edges = np.clip(edges, 0, len(a))
+        amp = np.zeros(W, dtype=np.float32)
+        ok = edges[1:] > edges[:-1]
+        if ok.any():
+            ab = np.abs(a[:int(edges[-1])]).astype(np.float32, copy=False)   # 截到最后一列为止，最后一段才不会拖到数组尾
+            starts = edges[:-1][ok]          # 有宽度的列首尾相接，起点严格递增
+            m = np.maximum.reduceat(ab, starts)
+            amp[ok] = m
+        return amp / self._norm
+
+    def _build_cache(self, dpr):
         W, H = self.width(), self.height()
-        bg = QPainterPath(); bg.addRoundedRect(QRectF(self.rect()), 10, 10)
-        p.fillPath(bg, QColor(255, 255, 255, 215))
+        PW, PH = max(1, int(W * dpr)), max(1, int(H * dpr))
+        base = QPixmap(PW, PH); base.setDevicePixelRatio(dpr); base.fill(Qt.transparent)
+        teal = None
         top, bottom = self._geom()
         mid = (top + bottom) / 2
         hw = (bottom - top) / 2
+        p = QPainter(base)
+        p.setRenderHint(QPainter.Antialiasing)
+        bg = QPainterPath(); bg.addRoundedRect(QRectF(0, 0, W, H), 10, 10)
+        p.fillPath(bg, QColor(255, 255, 255, 215))
         f = QFont(); f.setPointSize(8); p.setFont(f)
         fm = p.fontMetrics()
-        # 台词条
         for (s, e, text, idx, src) in self.lines:
             x0, x1 = self.x_of(s), self.x_of(e)
             if x1 < 0 or x0 > W:
@@ -460,53 +518,44 @@ class WaveformView(QWidget):
             t = fm.elidedText(t, Qt.ElideRight, int(max(0, x1 - x0 - 6)))
             p.setPen(col)
             p.drawText(QRectF(x0 + 4, 2, max(0, x1 - x0 - 6), self.LANE - 4), Qt.AlignVCenter | Qt.AlignLeft, t)
-        # 原字幕时间段（细线）
-        if self.sub:
-            x0, x1 = self.x_of(self.sub[0]), self.x_of(self.sub[1])
-            p.setPen(QPen(QColor(148, 163, 184), 1, Qt.DashLine))
-            p.drawLine(QPointF(x0, top), QPointF(x0, bottom)); p.drawLine(QPointF(x1, top), QPointF(x1, bottom))
-        # 选区
-        if self.cut:
-            x0, x1 = self.x_of(self.cut[0]), self.x_of(self.cut[1])
-            p.fillRect(QRectF(x0, top, x1 - x0, bottom - top), QColor(45, 212, 191, 50))
-        # 波形
         p.setPen(QPen(QColor(15, 23, 42, 22), 1))
         p.drawLine(QPointF(0, mid), QPointF(W, mid))
         if self.samples is not None and len(self.samples):
-            a = self.samples
-            i0 = (self.v0 - self.s_t0) * self.sr
-            per = self.span() * self.sr / max(1, W)
-            pen = QPen(QColor("#475569")); pen.setWidthF(1); p.setPen(pen)
-            inside = QPen(QColor("#0F766E")); inside.setWidthF(1)
-            cx0 = self.x_of(self.cut[0]) if self.cut else -1
-            cx1 = self.x_of(self.cut[1]) if self.cut else -1
-            if per < 1.5:       # 放得很大：直接连采样点
-                path = QPainterPath()
-                first = True
+            amp = self._envelope(PW, top * dpr, bottom * dpr)
+            if amp is None:      # 放得很大：直接连采样点（点数少）
+                a = self.samples
+                i0 = (self.v0 - self.s_t0) * self.sr
+                per = self.span() * self.sr / max(1, W)
                 k0, k1 = max(0, int(i0) - 1), min(len(a), int(i0 + W * per) + 2)
-                for k in range(k0, k1):
-                    x = (k - i0) / per
-                    y = mid - float(a[k]) / self._norm * hw
-                    if first:
-                        path.moveTo(x, y); first = False
-                    else:
+                path = QPainterPath()
+                if k1 > k0:
+                    ks = np.arange(k0, k1)
+                    xs = (ks - i0) / per
+                    ys = mid - a[k0:k1].astype(np.float64) / self._norm * hw
+                    path.moveTo(float(xs[0]), float(ys[0]))
+                    for x, y in zip(xs[1:].tolist(), ys[1:].tolist()):
                         path.lineTo(x, y)
-                p.setPen(inside); p.drawPath(path)
+                p.setPen(QPen(QColor("#475569"), 1)); p.drawPath(path)
+                teal = QPixmap(PW, PH); teal.setDevicePixelRatio(dpr); teal.fill(Qt.transparent)
+                q = QPainter(teal); q.setRenderHint(QPainter.Antialiasing)
+                q.setPen(QPen(QColor("#0F766E"), 1)); q.drawPath(path); q.end()
             else:
-                for x in range(W):
-                    k0, k1 = int(i0 + x * per), int(i0 + (x + 1) * per) + 1
-                    if k1 <= 0 or k0 >= len(a):
-                        continue
-                    seg = a[max(0, k0):min(len(a), k1)]
-                    if not len(seg):
-                        continue
-                    amp = float(np.abs(seg).max()) / self._norm * hw
-                    p.setPen(inside if cx0 <= x <= cx1 else pen)
-                    p.drawLine(QPointF(x + 0.5, mid - amp), QPointF(x + 0.5, mid + amp))
+                ys = np.arange(PH, dtype=np.float32)[:, None]
+                pm, phw = mid * dpr, hw * dpr
+                a_px = np.maximum(amp * phw, 0.5 * dpr)[None, :]
+                mask = np.abs(ys - pm) <= a_px
+                for col, which in (("#475569", "base"), ("#0F766E", "teal")):
+                    c = QColor(col)
+                    img = np.zeros((PH, PW), dtype=np.uint32)
+                    img[mask] = (0xFF << 24) | (c.red() << 16) | (c.green() << 8) | c.blue()
+                    qi = QImage(img.data, PW, PH, PW * 4, QImage.Format_ARGB32_Premultiplied).copy()
+                    if which == "base":
+                        p.save(); p.resetTransform(); p.drawImage(0, 0, qi); p.restore()
+                    else:
+                        teal = QPixmap.fromImage(qi); teal.setDevicePixelRatio(dpr)
         else:
             p.setPen(QColor("#94A3B8"))
             p.drawText(QRectF(0, top, W, bottom - top), Qt.AlignCenter, "波形加载中…")
-        # 识别出的词
         wy = bottom + 2
         row_end = [-1e9, -1e9]
         for w in self.words:
@@ -521,7 +570,6 @@ class WaveformView(QWidget):
             row_end[r] = x0 + tw
             p.setPen(QColor("#334155"))
             p.drawText(QRectF(x0 + 2, wy + r * 11, tw, 11), Qt.AlignVCenter | Qt.AlignLeft, w["w"])
-        # 刻度
         ry = H - 14
         p.setPen(QPen(QColor("#CBD5E1"), 1))
         p.drawLine(QPointF(0, ry), QPointF(W, ry))
@@ -535,7 +583,32 @@ class WaveformView(QWidget):
             p.drawLine(QPointF(x, ry), QPointF(x, ry + 4))
             p.drawText(QRectF(x + 2, ry, 70, 14), Qt.AlignVCenter | Qt.AlignLeft, fmt_short(t))
             t += step
-        # 手柄
+        p.end()
+        return base, teal
+
+    def paintEvent(self, ev):
+        dpr = self.devicePixelRatioF()
+        key = (self._gen, self.v0, self.v1, self.width(), self.height(), dpr)
+        if self._cache is None or self._cache[0] != key:
+            self._cache = (key, *self._build_cache(dpr))
+        _, base, teal = self._cache
+        p = QPainter(self)
+        p.setClipRegion(ev.region())
+        H = self.height()
+        top, bottom = self._geom()
+        if self.cut:     # 选区底色画在波形下面
+            x0, x1 = self.x_of(self.cut[0]), self.x_of(self.cut[1])
+        p.drawPixmap(0, 0, base)
+        if self.cut:
+            r = QRectF(x0, top, x1 - x0, bottom - top)
+            p.fillRect(r, QColor(45, 212, 191, 50))
+            if teal is not None:
+                p.save(); p.setClipRect(r, Qt.IntersectClip); p.drawPixmap(0, 0, teal); p.restore()
+        p.setRenderHint(QPainter.Antialiasing)
+        if self.sub:
+            sx0, sx1 = self.x_of(self.sub[0]), self.x_of(self.sub[1])
+            p.setPen(QPen(QColor(148, 163, 184), 1, Qt.DashLine))
+            p.drawLine(QPointF(sx0, top), QPointF(sx0, bottom)); p.drawLine(QPointF(sx1, top), QPointF(sx1, bottom))
         if self.cut:
             for t in self.cut:
                 x = self.x_of(t)
@@ -672,15 +745,37 @@ class WaveformView(QWidget):
             self.changed.emit(*self.cut)
 
     def wheelEvent(self, e):
-        dy = e.angleDelta().y() or e.angleDelta().x()
+        pd = e.pixelDelta()
+        ctrl = bool(e.modifiers() & (Qt.ControlModifier | Qt.MetaModifier))
+        if not pd.isNull():          # 触控板：按像素连续走
+            if ctrl:
+                self.zoom(1.0 - max(-0.5, min(0.5, pd.y() / 300.0)), self.t_of(e.position().x()))
+            else:
+                dx = pd.x() if abs(pd.x()) > abs(pd.y()) else pd.y()
+                dt = -dx / max(1, self.width()) * self.span()
+                self._set_view(self.v0 + dt, self.v1 + dt)
+            e.accept(); return
+        ad = e.angleDelta()
+        dy = ad.y() or ad.x()
         if not dy:
             return
-        if e.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
-            self.zoom(0.8 if dy > 0 else 1.25, self.t_of(e.position().x()))
+        if ctrl:
+            self.zoom(0.85 ** (dy / 120), self.t_of(e.position().x()))
         else:
-            dt = -dy / 120 * self.span() * 0.15
+            dt = -dy / 120 * self.span() * 0.12
             self._set_view(self.v0 + dt, self.v1 + dt)
         e.accept()
+
+    def event(self, e):
+        t = e.type()
+        if t == QEvent.NativeGesture:        # macOS 双指捏合
+            try:
+                if e.gestureType() == Qt.ZoomNativeGesture:
+                    self.zoom(1.0 / max(0.2, 1.0 + e.value()), self.t_of(e.position().x()))
+                    return True
+            except Exception:
+                pass
+        return super().event(e)
 
 
 class DialogueMap(QWidget):

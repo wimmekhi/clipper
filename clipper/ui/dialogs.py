@@ -201,6 +201,8 @@ class ExportDialog(QDialog):
             box = QGroupBox("版本（可多选）")
             bl = QVBoxLayout(box)
             for p in PRESETS:
+                if PRESETS[p].get("precise"):
+                    continue
                 lossless = PRESETS[p].get("lossless")
                 c = QCheckBox(p + ("（不重新编码，几乎瞬间出片；起点落在前一个关键帧，可能早零点几秒；不参与合集）"
                                    if lossless else ""))
@@ -225,7 +227,7 @@ class ExportDialog(QDialog):
         if REENCODE_UI:
             v.addWidget(QLabel("规格：H.264 + AAC 48kHz，23.976 帧，横屏 1280×720 / 竖屏 720×1280，faststart"))
         else:
-            hint = QLabel("原画无损：直接从原视频截取，不重新编码，几乎瞬间出片。起点落在前一个关键帧，可能比选区早零点几秒。")
+            hint = QLabel("原画精确剪切：起止和选区完全一致；只把这一小段重新编码，分辨率、帧率不变，码率跟原片差不多。")
             hint.setWordWrap(True); v.addWidget(hint)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("开始导出")
@@ -244,5 +246,6 @@ class ExportDialog(QDialog):
 
     def presets(self):
         if not self.checks:
-            return [p for p in PRESETS if PRESETS[p].get("lossless")]
+            from ..export import DEFAULT_PRESET
+            return [DEFAULT_PRESET]
         return [p for p, c in self.checks.items() if c.isChecked()]

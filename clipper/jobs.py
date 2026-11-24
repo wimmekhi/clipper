@@ -77,7 +77,7 @@ def export_items(lib, items: list[dict], out_dir: Path, presets: list[str], styl
     comp = {}
     if make_compilation:
         for p, files in done.items():
-            if len(files) >= 2 and not PRESETS[p].get("lossless"):   # 无损版各集编码不同，不能直接拼
+            if len(files) >= 2 and not (PRESETS[p].get("lossless") or PRESETS[p].get("precise")):   # 无损版各集编码不同，不能直接拼
                 try:
                     comp[p] = str(export.concat(files, out_dir / f"合集_{p}.mp4").name)
                 except Exception as ex:   # noqa
