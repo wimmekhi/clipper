@@ -238,6 +238,9 @@ def _ui_test_body():
     w.reset_cut()
     _pack_tests(w, app, root, s0, e0)
     w.reset_cut()
+    _h_keep = w.cur
+    _result_row_tests(w, app, root)
+    w.preview(_h_keep, autoplay=False); app.processEvents()
     from PySide6.QtCore import Qt as _Qt
     i0, i1 = w.script.item(0).data(_Qt.UserRole), w.script.item(1).data(_Qt.UserRole)
     w.pick_cue(i0); first = w.cur.idx
@@ -305,7 +308,8 @@ def _ui_test_body():
     return (f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、4 个页面；搜索/回车再搜/按匹配度/跨两行/剪辑页合并/采集包改名删除/快照不自动扫描+导出不进库/"
             f"选区自动保存/收藏提示/选到虚线/链接/精确剪切+重名(2)/收藏条数/波形缓存/全大写转换；"
             f"1.3.4 收藏=句型同名包（大小写/空白/...≡…、确认新建、取消不收、多同名取最近、只列同名、空搜索禁用）/"
-            f"文件夹增删改移+防套娃+旧库迁移/按文件夹导出只出视频/整集音轨/dpr=2 波形都过；最小宽 {mw}px")
+            f"文件夹增删改移+防套娃+旧库迁移/按文件夹导出只出视频/整集音轨/dpr=2 波形都过；"
+            f"1.3.5 结果行不重复（滚动后再搜/切标签/收藏/微调）+星标三态/批量查包/只从当前包移除/同步刷新；最小宽 {mw}px")
 
 
 def _rank_tests():
@@ -331,7 +335,39 @@ def _rank_tests():
     s_or = sc("… or …", "Or?"); s_ok = sc("… or …", "Coffee or tea?"); s_sym = sc("… or …", "I want the red one or that?")
     assert s_ok > s_sym > s_or, f"Or? 应垫底、空位对称加分：{s_ok} {s_sym} {s_or}"
     assert sc("is this his…", "No. Is this his signature?") > sc("is this his…", "So this is his strike two."), "原句型没排在近似前"
-    return "排名规则"
+    # --- 1.3.5 缩写互通：搜的写法 = 原句型，另一种写法 = 近似变体
+    pairs = [("this is", "This is my car.", "This's my car."), ("it is", "It is fine.", "It's fine."),
+             ("do not", "Do not touch it.", "Don't touch it."), ("cannot", "I cannot go.", "I can't go."),
+             ("it is not", "It is not fair.", "It isn't fair.")]
+    for q1, en1, en2 in pairs:
+        q2 = parse_query(en2).parts
+        q2 = next(" ".join(a.parts) for a in parse_query(q1).alts if all(w in q2 for w in a.parts))
+        for q, mine, other in ((q1, en1, en2), (q2, en2, en1)):
+            dm, do = A(q, mine), A(q, other)
+            assert dm and dm["tier"] == TIER_ORIG, f"{q}：自己的写法没认成原句型 {dm}"
+            assert do and do["tier"] == TIER_NEAR and do.get("alt"), f"{q}：另一种写法 {other!r} 应是近似变体 {do}"
+            assert sc(q, mine) > sc(q, other), f"{q}：缩写互通排序不对"
+    assert sc("this is", "This's my car.") > sc("this is", "Is this my car?"), "缩写互通应排在一般近似前"
+    assert A("can't", "I can not go.")["tier"] == TIER_NEAR and A("it's", "It has been fun.")["tier"] == TIER_NEAR
+    assert analyse(parse_query("it's"), "It is fine.", exact=True) is None, "精确模式不该缩写互通"
+    assert not parse_query("is this your…").alts and not parse_query("… or …").alts, "没有缩写的句型不该有变体"
+    # 搜索层：临时库里两种写法都能搜到，等级对
+    import tempfile
+    from clipper.library import Library
+    root = tempfile.mkdtemp(prefix="clipper-rank-"); dd = os.path.join(root, "Show", "S01"); os.makedirs(dd)
+    lines = ["This is my car.", "This's my car.", "It is fine.", "It's fine.", "Do not touch it.", "Don't touch it.",
+             "I cannot go.", "I can't go."]
+    with open(os.path.join(dd, "S01E01.srt"), "w", encoding="utf-8") as fh:
+        for i, ln in enumerate(lines):
+            fh.write(f"{i + 1}\n00:00:{i * 3:02d},000 --> 00:00:{i * 3 + 2:02d},000\n{ln}\n\n")
+    L = Library(root); L.scan(); S = Searcher(L)
+    for q, orig, near in (("this is", lines[0], lines[1]), ("this's", lines[1], lines[0]), ("it's", lines[3], lines[2]),
+                          ("it is", lines[2], lines[3]), ("do not", lines[4], lines[5]), ("don't", lines[5], lines[4]),
+                          ("can't", lines[7], lines[6]), ("cannot", lines[6], lines[7])):
+        got = {h.en: h.tier for h in S.search(q)}
+        assert got.get(orig) == TIER_ORIG and got.get(near) == TIER_NEAR, f"搜 {q}：{got}"
+    L.db.close()
+    return "排名规则 + 缩写互通"
 
 
 def _pack_tests(w, app, root, s0, e0):
@@ -367,7 +403,7 @@ def _pack_tests(w, app, root, s0, e0):
     w._test_newpack = (False, None)
     w.q.setText("  WHOSE   ...  is IT "); w.do_search(); app.processEvents()
     assert w.fav_pack_id == pa and "NCE1" in w.pack_btn_w.text(), f"同名包没认出来：{w.fav_pack_id} {w.pack_btn_w.text()}"
-    p0 = len(L.packs()); w.collect(h); app.processEvents()
+    p0 = len(L.packs()); w._test_confirm = False; w.collect(h); app.processEvents()   # 1.3.5：已在包里 → 问移除，取消
     assert len(L.packs()) == p0 and L.pack_count(pa) == 1, "同名包又新建了一个"
     # --- 多个同名包：用最近用过的；收藏到弹窗只列同名的
     other = L.create_pack("something else", fA)
@@ -383,7 +419,8 @@ def _pack_tests(w, app, root, s0, e0):
     w._fav_pick(pa); assert w.fav_pack_id == pa, "弹窗切换同名包失败"
     w._fav_pick(other); assert w.fav_pack_id == pa, "竟然能指向名字不同的包"
     w.collect(h)
-    assert L.pack_count(pb) == 0 and L.pack_count(other) == 0, "收进了别的包"
+    assert L.pack_count(pb) == 0 and L.pack_count(other) == 0 and L.pack_count(pa) == 1, "收进了别的包"
+    w._test_confirm = None
     # --- 搜索框空 / 改了没搜 / 链接打开：禁用
     w.q.setText(""); app.processEvents()
     assert w.active_pattern is None and not w.b_fav.isEnabled() and not w.pack_btn_w.isEnabled(), "空搜索时收藏没禁用"
@@ -457,6 +494,146 @@ def _pack_tests(w, app, root, s0, e0):
     f1 = M.create_folder("NCE1")
     assert M.create_pack("is this your…", f1), "迁移后同名包不能放进别的文件夹"
     M.db.close()
+
+
+def _result_row_tests(w, app, root):
+    """1.3.5：①结果列表不重复（以前滚动过再搜，_more 被滚动条信号重入，顶上多出两条旧行）；
+    ②星标三态 = 这条在不在采集包里（批量查一次）、点星只加进当前包、已在当前包 → 确认后只从当前包移除、各处变动后同步刷新。"""
+    import time
+    from PySide6.QtCore import QCoreApplication, QEvent, Qt
+    from clipper.ui.widgets import ResultRow, STAR_IN, STAR_OTHER, STAR_NONE
+    from clipper.ui.packs import K_PACK, SEP
+    L = w.lib
+    # 第二部剧：只有字幕，40 句同一句型
+    d = os.path.join(root, "Star Show", "S01"); os.makedirs(d, exist_ok=True)
+    animals = ["cat", "dog", "fish", "bird", "horse", "duck", "frog", "goat", "lamb", "mouse"]
+    with open(os.path.join(d, "S01E01.srt"), "w", encoding="utf-8") as fh:
+        for i in range(40):
+            a, b = animals[i % 10], animals[(i * 3 + 1) % 10]
+            t = 2 + i * 3
+            fh.write(f"{i + 1}\n00:{t // 60:02d}:{t % 60:02d},000 --> 00:{t // 60:02d}:{t % 60:02d},900\n"
+                     f"Is she a {a} person or a {b} person number {i}?\n她是{a}派还是{b}派？\n\n")
+    w.rescan(); w._scan.wait(60000); app.processEvents()
+    w.results.setFixedHeight(260)          # 视口矮一点，40 条一定能滚
+
+    def flush():
+        for _ in range(3):
+            app.processEvents()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        app.processEvents()
+
+    def check(tag):
+        flush()
+        vp = w.results.viewport()
+        items = [w.results.item(i) for i in range(w.results.count())]
+        widgets = [w.results.itemWidget(it) for it in items]
+        rows = [x for x in widgets if isinstance(x, ResultRow)]
+        ids = [r.hit.cue_id for r in rows]
+        assert len(ids) == len(set(ids)), f"{tag}：列表里有重复 cue_id：{len(ids)} 行 {len(set(ids))} 种"
+        n_hits = len(w.filtered())
+        assert len(rows) == min(n_hits, w.shown) and w.shown <= n_hits, \
+            f"{tag}：结果 {n_hits} 条，已加载 {w.shown}，列表里却有 {len(rows)} 行"
+        assert {cid: x[1] for cid, x in w.rows.items()} == {r.hit.cue_id: r for r in rows}, f"{tag}：rows 表和列表对不上"
+        live = [r for r in w.findChildren(ResultRow)]
+        assert all(r.parentWidget() is vp for r in live), f"{tag}：有结果行不在列表视口里"
+        vis = [r for r in live if r.isVisible() and r.geometry().intersects(vp.rect())]   # 视口里看得见的
+        stray = [r for r in vis if r not in rows]
+        assert not stray, f"{tag}：视口里浮着 {len(stray)} 条不属于列表的旧行（{[r.hit.en for r in stray][:2]}）"
+        want = [r for r, it in zip(widgets, items) if isinstance(r, ResultRow) and not it.isHidden()
+                and w.results.visualItemRect(it).intersects(vp.rect())]
+        assert set(map(id, vis)) == set(map(id, want)), f"{tag}：视口里可见 {len(vis)} 行，应为 {len(want)} 行"
+        return len(rows)
+
+    sb = w.results.verticalScrollBar()
+    w.q.setText("is she a ... or a ..."); w.do_search(); flush()
+    assert len(w.hits) >= 30, f"测试剧没搜出来：{len(w.hits)}"
+    check("第一次搜索")
+    for v in (sb.maximum(), sb.maximum() // 2, 120):
+        sb.setValue(v); flush()
+        w.do_search(); check(f"滚到 {v} 后再搜")
+        sb.setValue(sb.maximum()); flush()
+        w.tabs.setCurrentIndex(2); check("切到近似变体"); sb.setValue(sb.maximum()); flush()
+        w.tabs.setCurrentIndex(0); check("切回全部")
+    # 收藏 / 微调 / 再搜：前两条不能「多出旧的」
+    w._test_newpack = (True, None)
+    w.preview(w.sorted_hits()[0], autoplay=False); flush()
+    s, e = w.cur_span
+    w._cut_changed(s + 0.2, e + 0.1); w._flush_cut(); w.collect(w.cur); check("微调+收藏后")
+    sb.setValue(sb.maximum()); flush()
+    w.do_search(); check("收藏后滚动再搜")
+    top = [w.results.itemWidget(w.results.item(i)) for i in range(2)]
+    assert top[0].hit.cue_id != top[1].hit.cue_id and top[0].star_state == STAR_IN and \
+        abs(L.final_span(w._cue_row(top[0].hit), top[0].hit.media_key)[0] - (s + 0.2)) < 1e-6, "第一条状态 / 时间不对"
+    # 滚到底分页加载也不重复
+    while w.shown < len(w.items):
+        sb.setValue(sb.maximum()); flush()
+        if w.shown >= len(w.items):
+            break
+    check("滚到底")
+
+    # ---------- 星标三态
+    hs = w.sorted_hits()
+    target = w.fav_pack_id
+    assert target is not None and L.pack(target)["name"] == w.active_pattern, "没建同名目标包"
+    fo = L.ensure_folder_path("星标测试/别的")
+    other = L.create_pack("另一个包", fo)
+    A, B, C = hs[0], hs[1], hs[2]                     # A 在目标包（上面收藏的）；B 只在别的包；C 哪都不在
+    L.add_to_pack(other, B.media_key, B.idx, "x", B.tier)
+    calls = []
+    real = L.pack_membership
+    L.pack_membership = lambda keys=None: (calls.append(1), real(keys))[1]
+    try:
+        w.render_results()
+    finally:
+        L.pack_membership = real
+    assert len(calls) == 1, f"建结果行时应只批量查一次采集包，实际 {len(calls)} 次"
+    rw = lambda h: w.rows[h.cue_id][1]
+    assert (rw(A).star_state, rw(B).star_state, rw(C).star_state) == (STAR_IN, STAR_OTHER, STAR_NONE), \
+        f"星标三态不对：{rw(A).star_state} {rw(B).star_state} {rw(C).star_state}"
+    p_other = SEP.join(L.pack_path(other)); p_tgt = SEP.join(L.pack_path(target))
+    assert p_other in rw(B).star.toolTip() and p_tgt in rw(A).star.toolTip(), "悬停提示没列出完整路径"
+    keep = {h.cue_id: rw(h) for h in (A, B, C)}
+    # 点 B 的星：只加进当前包，别的包不动
+    n_other = L.pack_count(other)
+    w.collect(B); flush()
+    assert rw(B).star_state == STAR_IN and L.pack_count(other) == n_other, "点星没加进当前包或动了别的包"
+    assert p_other in rw(B).star.toolTip(), "也在别的包时提示里没列出来"
+    # 顶部「收藏」按钮跟当前片段
+    w.preview(C, autoplay=False); flush()
+    assert w.b_fav.property("star") == STAR_NONE and w.b_fav.text() == "收藏", "收藏按钮没反映灰色状态"
+    w.preview(A, autoplay=False); flush()
+    assert w.b_fav.property("star") == STAR_IN and w.b_fav.text() == "已收藏", "收藏按钮没反映实心状态"
+    # 已在当前包：取消不删；确认只从当前包删
+    w._test_confirm = False; w.collect(A); flush()
+    assert rw(A).star_state == STAR_IN and A.idx in [r["idx"] for r in L.pack_items(target)], "取消了却移除了"
+    L.add_to_pack(other, A.media_key, A.idx, "x", A.tier)
+    w._test_confirm = True; w.collect(A); flush(); w._test_confirm = None
+    assert A.idx not in [r["idx"] for r in L.pack_items(target)] and A.idx in [r["idx"] for r in L.pack_items(other)], \
+        "移除应只动当前包"
+    assert rw(A).star_state == STAR_OTHER and w.b_fav.property("star") == STAR_OTHER, "移除后星标没刷新"
+    # 采集包页里移除条目 → 结果行星标同步
+    w.refresh_packs((K_PACK, target)); flush()
+    for i in range(w.pack_list.count()):
+        if tuple(w.pack_list.item(i).data(Qt.UserRole + 1)) == (B.media_key, B.idx):
+            w.pack_list.setCurrentRow(i)
+    w._pack_remove(); flush()
+    assert rw(B).star_state == STAR_OTHER, "采集包页移除后星标没同步"
+    # 删除包 → 同步
+    w.refresh_packs((K_PACK, other)); w._test_confirm = True; w.delete_pack(); w._test_confirm = None; flush()
+    assert rw(A).star_state == STAR_NONE and rw(B).star_state == STAR_NONE, "删包后星标没同步"
+    # 切换「收藏到」目标 → 同步
+    t2 = L.create_pack(w.active_pattern, fo)
+    L.add_to_pack(t2, C.media_key, C.idx, w.active_pattern, C.tier)
+    w.refresh_packs(); flush()
+    assert rw(C).star_state == STAR_OTHER, "只在另一个同名包里应是金色空心"
+    w._fav_pick(t2); flush()
+    assert rw(C).star_state == STAR_IN and w.fav_pack_id == t2, "切换目标后星标没同步"
+    w._fav_pick(target); flush()
+    assert rw(C).star_state == STAR_OTHER, "切回目标后星标没同步"
+    assert all(rw(w.hits[[h.cue_id for h in w.hits].index(cid)]) is x for cid, x in keep.items()), "刷新星标却重建了列表"
+    check("星标操作后")
+    w.results.setMinimumHeight(0); w.results.setMaximumHeight(16777215)
+    w._test_newpack = None
 
 
 def _wave_tests(w, app):
@@ -566,7 +743,7 @@ def selftest(out, smoke_wav=None):
         import clipper.ui.aligncenter  # noqa
         return "ok"
     chk("qt+multimedia+ui", qt)
-    chk("搜索排名（1.3.4）", _rank_tests)
+    chk("搜索排名（1.3.5 含缩写互通）", _rank_tests)
     chk("界面：顶栏/页面/搜索/工作台/链接/无损导出", _ui_test)
     def mp_lock():
         lk = multiprocessing.RLock()   # 会拉起 resource_tracker 子进程；没处理好就会重开整个程序

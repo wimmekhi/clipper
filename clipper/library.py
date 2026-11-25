@@ -200,6 +200,7 @@ class Library:
         db.execute("CREATE INDEX IF NOT EXISTS packs_folder ON packs(folder_id)")
         db.execute("CREATE INDEX IF NOT EXISTS folders_parent ON folders(parent_id)")
         db.execute("CREATE INDEX IF NOT EXISTS pack_items_pack ON pack_items(pack_id, pos)")
+        db.execute("CREATE INDEX IF NOT EXISTS pack_items_key ON pack_items(media_key, idx)")
 
     # ---------- 路径 ----------
     def abs(self, rel: str | None) -> Path | None:
@@ -927,6 +928,28 @@ class Library:
         self.db.execute("DELETE FROM pack_items WHERE pack_id=?", (pack_id,))
         self.db.execute("DELETE FROM packs WHERE id=?", (pack_id,))
         self.db.commit()
+
+    def pack_membership(self, media_keys=None) -> dict:
+        """1.3.5：{(media_key, idx): {pack_id, …}}，一次查询（结果行星标用，不逐行查库）。
+        media_keys 给了且不多时只查这些集，否则整张表一次读出来。"""
+        keys = sorted(set(media_keys)) if media_keys is not None else None
+        if keys is not None and not keys:
+            return {}
+        if keys is not None and len(keys) <= 500:
+            rows = self.db.execute("SELECT pack_id, media_key, idx FROM pack_items WHERE media_key IN (%s)"
+                                   % ",".join("?" * len(keys)), keys).fetchall()
+        else:
+            rows = self.db.execute("SELECT pack_id, media_key, idx FROM pack_items").fetchall()
+        out = {}
+        for pid, key, idx in rows:
+            out.setdefault((key, idx), set()).add(pid)
+        return out
+
+    def remove_from_pack(self, pack_id: int, key: str, idx: int) -> bool:
+        """只从这一个包里拿掉这一条（别的包不动）。"""
+        cur = self.db.execute("DELETE FROM pack_items WHERE pack_id=? AND media_key=? AND idx=?", (pack_id, key, idx))
+        self.db.commit()
+        return cur.rowcount > 0
 
     def remove_item(self, item_id: int):
         self.db.execute("DELETE FROM pack_items WHERE id=?", (item_id,))

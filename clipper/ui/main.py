@@ -29,7 +29,8 @@ from ..library import Library, JOIN_BASE, AUTO_BASE, INDEX_VER
 from ..search import Searcher, Hit, TIER_ORIG, TIER_NEAR, TIER_FUNC, _tier_rank
 from ..export import Style, clip_name
 from .widgets import (WaveformView, OverviewTrack, GroupHeader, ResultRow, fmt_ms, fmt_short, highlight_html,
-                      TIMING_TEXT, FlowLayout, tag, MONO, TagDelegate, Toast, star_pop)
+                      TIMING_TEXT, FlowLayout, tag, MONO, TagDelegate, Toast, star_pop, star_icon,
+                      STAR_NONE, STAR_OTHER, STAR_IN)
 from .workers import ScanWorker, AlignWorker, ExportWorker, WaveWorker, OverviewWorker, UpdateCheck, UpdateDownload
 from .packs import PackTree, PackItemList, PackPicker, NewPackDialog, path_text, SEP, K_FOLDER, K_PACK
 from .dialogs import SettingsDialog, ExportDialog
@@ -96,6 +97,9 @@ class MainWindow(QMainWindow):
         self.items = []            # 搜索结果展开后的行：("g", key, label, n) / ("r", hit)
         self.shown = 0
         self.rows = {}             # cue_id -> (QListWidgetItem, ResultRow)
+        self._pack_map = {}        # 1.3.5：(media_key, idx) -> {pack_id}，渲染结果时批量查一次
+        self._pack_map_keys = set()
+        self._path_cache = {}
         self.group_items = {}      # media_key -> [QListWidgetItem]
         self.collapsed = set()
         self.checked = {}          # cue_id -> hit
@@ -346,7 +350,7 @@ class MainWindow(QMainWindow):
     def _page_search(self):
         page = QWidget(); v = QVBoxLayout(page); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
         opts = FlowLayout(spacing=6)
-        self.c_exact = chip("精确", tip="不做词形变化（loved 不算 love）")
+        self.c_exact = chip("精确", tip="不做词形变化（loved 不算 love），缩写不互通（it's 不算 it is）")
         self.c_order = chip("严格顺序", tip="词必须按顺序连在一起；* 或 ... 表示中间可以有几个词")
         self.c_single = chip("只看单人", True)
         self.c_video = chip("只看有视频")
@@ -656,16 +660,87 @@ class MainWindow(QMainWindow):
             tip = f"还没有采集包「{pat}」：收藏时会先确认新建"
         b.setText(txt); b.setToolTip(tip)
         b.setEnabled(bool(pat))
-        fb = getattr(self, "b_fav", None)
-        if fb is not None:
-            fb.setEnabled(bool(pat))
-            fb.setToolTip("收藏到和搜索句型同名的采集包（Ctrl+D）" if pat else "先搜索句型")
-        for it, w in getattr(self, "rows", {}).values():
-            st = getattr(w, "star", None)
-            if st is not None:
-                st.setEnabled(bool(pat))
-                st.setToolTip("收藏到采集包「%s」（Ctrl+D）" % pat if pat else "先搜索句型")
+        self._refresh_stars()
         self._sync_pack_count()
+
+    # ---------- 1.3.5 星标：这条在不在采集包里
+    def _packs_of(self, key, idx):
+        """这条所在的包 id 集合（来自批量查好的 _pack_map；不在缓存范围里的集才单独查一次）。"""
+        m = getattr(self, "_pack_map", None)
+        if m is None or key not in getattr(self, "_pack_map_keys", set()):
+            if not self.lib:
+                return set()
+            extra = self.lib.pack_membership([key])
+            if m is None:
+                m = self._pack_map = {}
+                self._pack_map_keys = set()
+            m.update(extra)
+            self._pack_map_keys.add(key)
+        return m.get((key, idx), set())
+
+    def _pack_path_str(self, pid):
+        c = self._path_cache
+        if pid not in c:
+            c[pid] = SEP.join(self.lib.pack_path(pid)) if self.lib else ""
+        return c[pid]
+
+    def _star_info(self, key, idx):
+        """(状态, 悬停提示)。实心金 = 在当前目标包；金色空心 = 只在别的包；灰色空心 = 不在任何包。"""
+        pids = self._packs_of(key, idx)
+        pat = self.active_pattern
+        target = self.fav_pack_id if pat else None
+        if target is not None and self.lib and not self.lib.pack(target):
+            target = None
+        paths = sorted(self._pack_path_str(p) for p in pids if p != target)
+        if target is not None and target in pids:
+            state = STAR_IN
+            tip = f"已在当前采集包：{self._pack_path_str(target)}"
+            if paths:
+                tip += "\n也在：\n" + "\n".join("  " + x for x in paths)
+            tip += "\n再点一下：从当前包移除（别的包不动）"
+            return state, tip
+        if pids:
+            tip = "在这些采集包里：\n" + "\n".join("  " + x for x in paths)
+        else:
+            tip = "不在任何采集包里"
+        if not pat:
+            tip += "\n先搜索句型才能收藏"
+        elif target is not None:
+            tip += f"\n点一下收藏到「{self._pack_path_str(target)}」（Ctrl+D）"
+        else:
+            tip += f"\n点一下收藏到新包「{pat}」（会先确认新建）"
+        return (STAR_OTHER if pids else STAR_NONE), tip
+
+    def _refresh_stars(self):
+        """收藏 / 移除 / 删包 / 改名挪动 / 切换目标后：重查一次包成员，只更新现有行的星标（不重建列表）。"""
+        self._path_cache = {}
+        keys = set(getattr(self, "_pack_map_keys", set()))
+        if self.cur:
+            keys.add(self.cur.media_key)
+        self._pack_map = self.lib.pack_membership(keys) if self.lib else {}
+        self._pack_map_keys = keys
+        pat = bool(self.active_pattern)
+        for it, w in getattr(self, "rows", {}).values():
+            if getattr(w, "star", None) is not None:
+                w.set_star(*self._star_info(w.hit.media_key, w.hit.idx))
+                w.star.setEnabled(pat)
+        self._sync_fav_btn()
+
+    def _sync_fav_btn(self):
+        """顶部选区排的「收藏」按钮跟当前片段的星标同一个状态。"""
+        fb = getattr(self, "b_fav", None)
+        if fb is None:
+            return
+        pat = bool(self.active_pattern)
+        fb.setEnabled(pat)
+        if self.cur and self.lib:
+            state, tip = self._star_info(self.cur.media_key, self.cur.idx)
+        else:
+            state, tip = STAR_NONE, ("先在左边选一条片段" if pat else "先搜索句型")
+        fb.setIcon(star_icon(state))
+        fb.setText("已收藏" if state == STAR_IN else "收藏")
+        fb.setToolTip(tip)
+        fb.setProperty("star", state)
 
     # ================================================================== 菜单 / 快捷键
     def _act(self, text, fn, key=None, tip=None, icon=None, checkable=False):  # noqa: icon 是主题图标名
@@ -1363,8 +1438,22 @@ class MainWindow(QMainWindow):
                 hs = groups[k]
                 self.items.append(("g", k, hs[0].label, len(hs)))
                 self.items += [("r", h) for h in hs]
-        self.results.clear(); self.rows.clear(); self.group_items.clear()
-        self.shown = 0
+        # 1.3.5 修「前两条重复」：以前 clear() 后滚动条从旧位置夹回 0 是在 _more() 加第 3 行时才同步触发的
+        # （addItem → 执行挂起的布局 → valueChanged → _maybe_more），那时 self.shown 还是 0，于是嵌套的 _more
+        # 把整页又加了一遍：顶上两行是外层先加的（不在 self.rows 里，之后微调/收藏都不更新），后面才是正常行。
+        # 现在：清空时屏蔽滚动条信号并先归零，_more 先占位 self.shown 再加行，且加行期间不接受嵌套。
+        sb = self.results.verticalScrollBar()
+        sb.blockSignals(True)
+        try:
+            self.results.clear(); self.rows.clear(); self.group_items.clear()
+            self.shown = 0
+            sb.setValue(0)
+        finally:
+            sb.blockSignals(False)
+        lst_keys = {h.media_key for h in lst}
+        self._pack_map = self.lib.pack_membership(lst_keys) if self.lib else {}
+        self._pack_map_keys = lst_keys
+        self._path_cache = {}
         self._more()
         n = len(lst)
         files = len(order)
@@ -1373,9 +1462,23 @@ class MainWindow(QMainWindow):
         self._update_sel()
 
     def _more(self):
+        if getattr(self, "_adding_rows", False):       # 1.3.5：加行中途滚动条变化引起的重入，忽略
+            return
+        batch = self.items[self.shown:self.shown + PAGE]
+        if not batch:
+            return
+        self.shown = min(len(self.items), self.shown + PAGE)   # 先占位：就算有重入也不会再加同一批
+        self._adding_rows = True
+        try:
+            self._add_rows(batch)
+        finally:
+            self._adding_rows = False
+
+    def _add_rows(self, batch):
         vw = self._row_width()
         cur_group = None
-        for item in self.items[self.shown:self.shown + PAGE]:
+        star_info = self._star_info
+        for item in batch:
             it = QListWidgetItem()
             if item[0] == "g":
                 w = GroupHeader(item[1], item[2], item[3])
@@ -1393,8 +1496,9 @@ class MainWindow(QMainWindow):
                 w.export_one.connect(self.export_one)
                 w.link.connect(self.copy_link)
                 w.checked.connect(self._row_checked)
-                if getattr(w, "star", None) is not None and not self.active_pattern:
-                    w.star.setEnabled(False); w.star.setToolTip("先搜索句型")
+                w.set_star(*star_info(h.media_key, h.idx))
+                if not self.active_pattern:
+                    w.star.setEnabled(False)
                 if h.cue_id in self.checked:
                     w.cb.setChecked(True)
                 if self.cur and h.cue_id == self.cur.cue_id:
@@ -1406,7 +1510,6 @@ class MainWindow(QMainWindow):
             self.results.addItem(it)
             self.results.setItemWidget(it, w)
             it.setSizeHint(QSize(vw, self._row_h(w, vw)))
-        self.shown = min(len(self.items), self.shown + PAGE)
 
     def _row_width(self):
         return max(200, self.results.viewport().width() - 4)
@@ -1443,6 +1546,8 @@ class MainWindow(QMainWindow):
             it.setHidden(not open_)
 
     def _maybe_more(self, v):
+        if getattr(self, "_adding_rows", False):
+            return
         sb = self.results.verticalScrollBar()
         if v >= sb.maximum() - 60 and self.shown < len(self.items):
             self._more()
@@ -1554,6 +1659,7 @@ class MainWindow(QMainWindow):
             self.rows[old.cue_id][1].set_selected(False)
         if h.cue_id in self.rows:
             self.rows[h.cue_id][1].set_selected(True)
+        self._sync_fav_btn()
         self.refresh_current()
         if not h.has_video:
             return
@@ -1973,6 +2079,21 @@ class MainWindow(QMainWindow):
 
     def collect(self, h):
         self._flush_cut()          # 先把调好的选区存下来，包里导出时按它切
+        # 1.3.5：已经在当前目标包里 → 确认后只从当前包移除；永远不动别的包
+        if self.active_pattern and self.lib:
+            self._resolve_fav()
+            cur_pid = self.fav_pack_id
+            if cur_pid is not None and self.lib.pack(cur_pid) and \
+                    cur_pid in self.lib.pack_membership([h.media_key]).get((h.media_key, h.idx), set()):
+                path = SEP.join(self.lib.pack_path(cur_pid))
+                if not self._ask("从采集包移除", f"从「{path}」移除这一条？",
+                                 "只从这个包里拿掉；别的采集包、选区和已导出的文件都不动。", "移除"):
+                    return
+                self.lib.remove_from_pack(cur_pid, h.media_key, h.idx)
+                self.toast.pop(f"已从「{path}」移除", True, "✓  ")
+                self.statusBar().showMessage(f"已从「{path}」移除这一条", 2500)
+                self.refresh_packs()
+                return
         pid = self._fav_target()
         if pid is None:
             return
@@ -2206,6 +2327,8 @@ class MainWindow(QMainWindow):
             self.lib.remove_item(it.data(Qt.UserRole))
             self.load_pack()
             self._update_tree_counts()
+            self._refresh_stars()          # 1.3.5：剪辑页结果行的星标跟着变
+            self._sync_pack_count()
 
     def _update_tree_counts(self):
         sel = self.pack_tree.current()

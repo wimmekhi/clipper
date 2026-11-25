@@ -24,7 +24,8 @@ def highlight_html(en: str, matched: str) -> str:
     if not matched:
         return text
     words = matched.split()
-    pat = r"\b" + r"[\W_]+".join(re.escape(html.escape(w)) for w in words) + r"\b"
+    apos = re.escape(html.escape("'"))
+    pat = r"\b" + r"[\W_]+".join(re.escape(html.escape(w)).replace(apos, "(?:%s|’|‘)" % apos) for w in words) + r"\b"
     return re.sub(pat, lambda m: f'<span style="color:#F43F5E;font-weight:700">{m.group(0)}</span>', text,
                   count=1, flags=re.I)
 
@@ -1135,16 +1136,22 @@ class ResultRow(QFrame):
             h.addWidget(b, 0, Qt.AlignVCenter)
             if nm == "star":
                 self.star = b
+                self.set_star(STAR_NONE)
 
     def set_span(self, s, e):
         self.tm.setText(f"{fmt_short(s)} – {fmt_short(e)}")
         self.tm.setToolTip(f"{fmt_ms(s)} – {fmt_ms(e)}")
 
+    def set_star(self, state, tip=None):
+        """1.3.5 星标：STAR_IN 实心金 = 在当前目标包；STAR_OTHER 金色空心 = 只在别的包；STAR_NONE 灰色空心。"""
+        self.star_state = state
+        self.star.setIcon(star_icon(state))
+        if tip is not None:
+            self.star.setToolTip(tip)
+
     def mark_collected(self):
         """收藏后：星星变成实心金色，并「弹」一下。"""
-        from .theme import icon
-        self.star.setIcon(icon("star", "#F59E0B", 16, fill="#FBBF24"))
-        self.star.setToolTip("已收藏（再点会提示已在包里）")
+        self.set_star(STAR_IN)
         star_pop(self.star)
 
     def set_selected(self, on):
@@ -1192,6 +1199,24 @@ class TagDelegate(QStyledItemDelegate):
 
 
 # ---------------------------------------------------------------- 收藏动效（1.3.0）
+STAR_NONE, STAR_OTHER, STAR_IN = "none", "other", "in"
+_STAR_ICONS = {}
+
+
+def star_icon(state, size=16):
+    """星标三态图标（缓存：上千行结果不必每行重新画 SVG）。"""
+    k = (state, size)
+    if k not in _STAR_ICONS:
+        from .theme import icon
+        if state == STAR_IN:
+            _STAR_ICONS[k] = icon("star", "#F59E0B", size, fill="#FBBF24")
+        elif state == STAR_OTHER:
+            _STAR_ICONS[k] = icon("star", "#F59E0B", size)
+        else:
+            _STAR_ICONS[k] = icon("star", "#94A3B8", size)
+    return _STAR_ICONS[k]
+
+
 def star_pop(button, big=26, small=16):
     """按钮上的图标放大再弹回（约 0.35 秒）。"""
     from PySide6.QtCore import QVariantAnimation, QEasingCurve
