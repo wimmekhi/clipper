@@ -229,33 +229,14 @@ def _ui_test_body():
     assert w.lib.final_span(row, w.cur.media_key)[2] == "manual", "微调没保存"
     w.reset_cut()
     # 1.3.0：选区改动自动保存；收藏 / 导出按调好的范围
+    w._test_newpack = (True, "default")       # 1.3.4：还没有同名包 → 确认新建（自测不弹窗）
     w._cut_changed(s0 + 0.1, e0 - 0.1); w._flush_cut()
     sp = w.lib.final_span(w._cue_row(w.cur), w.cur.media_key)
     assert sp[2] == "manual" and abs(sp[0] - (s0 + 0.1)) < 1e-6, f"选区没自动保存：{sp}"
     w.collect(w.cur); app.processEvents()
     assert w.toast.isVisible() and "收藏" in w.toast.text(), "收藏没有提示"
     w.reset_cut()
-    # 1.3.1：采集包重命名 / 删除（删除只动包，不动微调和文件）
-    from PySide6.QtWidgets import QInputDialog as _QID
-    _orig = _QID.getText
-    pid0 = w.pack_cb.currentData(); n_items = w.pack_list.count()
-    _QID.getText = staticmethod(lambda *a, **k: ("改名测试包", True))
-    try:
-        w.rename_pack()
-    finally:
-        _QID.getText = _orig
-    assert w.pack_cb.currentText() == "改名测试包" and w.pack_cb.currentData() == pid0 \
-        and w.pack_list.count() == n_items, "采集包重命名失败"
-    w.lib.pack_id("另一个包"); w.refresh_packs("改名测试包")
-    assert not w.lib.rename_pack(pid0, "另一个包"), "重名没拦住"
-    w.lib.save_adjust(w.cur.media_key, w.cur.idx, s0 + 0.05, e0)
-    w._test_confirm = False; w.delete_pack()
-    assert any(p["id"] == pid0 for p in w.lib.packs()), "点了取消却删了包"
-    w._test_confirm = True; w.delete_pack(); w._test_confirm = None
-    assert not any(p["id"] == pid0 for p in w.lib.packs()), "采集包没删掉"
-    assert not w.lib.db.execute("SELECT 1 FROM pack_items WHERE pack_id=?", (pid0,)).fetchone(), "包条目没清"
-    assert w.lib.final_span(w._cue_row(w.cur), w.cur.media_key)[2] == "manual", "删包误删了微调"
-    assert w.pack_cb.currentText() == "另一个包", "删包后没切到剩下的包"
+    _pack_tests(w, app, root, s0, e0)
     w.reset_cut()
     from PySide6.QtCore import Qt as _Qt
     i0, i1 = w.script.item(0).data(_Qt.UserRole), w.script.item(1).data(_Qt.UserRole)
@@ -286,7 +267,7 @@ def _ui_test_body():
         r = jobs.export_items(w.lib, [dict(row=xr)], od, ["横屏原画精确"], w.style())
         assert r["ok"], r
     r = jobs.export_items(w.lib, [dict(row=xr), dict(row=xr)], od, ["横屏原画精确"], w.style(), make_compilation=False)
-    names = sorted(f.name for f in (od / "横屏原画精确").iterdir())
+    names = sorted(f.name for f in od.iterdir())       # 1.3.4：只出视频，没有预设名那一层、没有说明 / manifest
     want = clip_name(xr["en"])
     assert names == sorted([f"{want}.mp4"] + [f"{want} ({k}).mp4" for k in (2, 3, 4)]), f"导出文件名不对：{names}"
     from clipper.subs import clean_en
@@ -308,7 +289,9 @@ def _ui_test_body():
     _dur = float(_d.group(3)) + int(_d.group(2)) * 60
     assert abs(_dur - 1.5) < 0.12, f"精确剪切时长不对：{_dur}"
     # 1.3.3：收藏在选区那排，前面显示包里条数
-    assert w.pack_n_lb.text() == f"{w.pack_list.count()} 条", w.pack_n_lb.text()
+    _fp = w.fav_pack_id if w.active_pattern else None
+    assert w.pack_n_lb.text() == f"{w.lib.pack_count(_fp) if _fp else 0} 条", w.pack_n_lb.text()
+    _wave_tests(w, app)
     # 1.3.3：波形缓存——播放头移动不重建缓存
     w.wave.update(); w.wave.repaint(); _k = w.wave._cache[0] if w.wave._cache else None
     w.wave.set_playhead((w.wave.v0 + w.wave.v1) / 2, True, 1.0); w.wave.repaint()
@@ -317,10 +300,207 @@ def _ui_test_body():
     for i in range(4):
         w.goto(i); app.processEvents()
     mw = w.minimumSizeHint().width()
-    assert mw <= 1000, f"主窗口最小宽度 {mw}px 太大"
+    assert mw <= 820, f"主窗口最小宽度 {mw}px 太大：" + str([w.stack.widget(i).minimumSizeHint().width() for i in range(w.stack.count())]) + w.pack_btn_w.text()
     w.close(); app.processEvents()
     return (f"菜单 {len(menus)} 个、顶栏 {len(tb.actions())} 项、4 个页面；搜索/回车再搜/按匹配度/跨两行/剪辑页合并/采集包改名删除/快照不自动扫描+导出不进库/"
-            f"选区自动保存/收藏提示/选到虚线/链接/精确剪切+重名(2)/收藏条数/波形缓存/全大写转换都过；最小宽 {mw}px")
+            f"选区自动保存/收藏提示/选到虚线/链接/精确剪切+重名(2)/收藏条数/波形缓存/全大写转换；"
+            f"1.3.4 收藏=句型同名包（大小写/空白/...≡…、确认新建、取消不收、多同名取最近、只列同名、空搜索禁用）/"
+            f"文件夹增删改移+防套娃+旧库迁移/按文件夹导出只出视频/整集音轨/dpr=2 波形都过；最小宽 {mw}px")
+
+
+def _rank_tests():
+    """1.3.4 排名：Hi 误伤、Or? 不靠前、空位、排除表、跨句、等级进分数。"""
+    from clipper.search import analyse, parse_query, TIER_ORIG, TIER_NEAR, Searcher
+    A = lambda q, en: analyse(parse_query(q), en)
+    assert A("is this his…", "Hi, guys! This is Josh.") is None, "his 被当成 hi（Hi 误伤）"
+    assert A("is this his…", "No. Is this his signature?")["tier"] == TIER_ORIG, "句首语气词 + 句型没认成原句型"
+    assert A("… or …", "Or?")["tier"] == TIER_NEAR and A("… or …", "Or?")["unfilled"] == 2, "Or? 不该是原句型"
+    assert A("… or …", "Coffee or tea?")["tier"] == TIER_ORIG, "空位填满的没认成原句型"
+    for en in ("It took ten minutes or so.", "Whether or not you like it.", "Either you go or I go.", "Is he crazy or what?"):
+        assert A("… or …", en)["tier"] == TIER_NEAR, f"排除表没生效：{en}"
+    assert A("would you mind …", "Would you mind? Close the door.")["tier"] == TIER_NEAR, "空位跨句了"
+    assert A("is this your…", "This is great. Your car?") is not None and \
+        A("is this your…", "This is great. Your car?")["tier"] == TIER_NEAR, "句型跨句了"
+    class _R(dict):
+        def keys(self):
+            return super().keys()
+    base = dict(speakers=1, a_start=None, a_end=None, a_score=None, zh="", has_video=1, en="")
+    def sc(q, en, dur=2.0):
+        qu = parse_query(q); d = analyse(qu, en)
+        return Searcher._score(_R(base, en=en), d, dur, qu)
+    s_or = sc("… or …", "Or?"); s_ok = sc("… or …", "Coffee or tea?"); s_sym = sc("… or …", "I want the red one or that?")
+    assert s_ok > s_sym > s_or, f"Or? 应垫底、空位对称加分：{s_ok} {s_sym} {s_or}"
+    assert sc("is this his…", "No. Is this his signature?") > sc("is this his…", "So this is his strike two."), "原句型没排在近似前"
+    return "排名规则"
+
+
+def _pack_tests(w, app, root, s0, e0):
+    """1.3.4：收藏 = 句型同名包；文件夹；导出结构。"""
+    import sqlite3, tempfile, time
+    from pathlib import Path
+    from clipper.library import Library
+    from clipper.export import clip_name
+    from clipper.ui.packs import K_PACK, K_FOLDER
+    from PySide6.QtCore import Qt
+    L = w.lib
+    # --- 同名规则
+    assert L.norm_name("  Is  THIS his... ") == L.norm_name("is this his…"), "包名匹配规则不对"
+    first = L.packs_named("know what you are doing")
+    assert len(first) == 1 and L.pack(first[0])["name"] == "know what you are doing" and L.pack_count(first[0]) == 1, \
+        f"第一次收藏没新建同名包：{[dict(p) for p in L.packs()]}"
+    n_items = lambda: L.db.execute("SELECT COUNT(*) FROM pack_items").fetchone()[0]
+    # --- 不存在 → 取消就不收
+    w.q.setText("whose ... is it"); w.do_search(); app.processEvents()
+    assert w.active_pattern == "whose … is it" and w.hits, f"句型没记下：{w.active_pattern}"
+    h = next(x for x in w.hits if "turn" in x.en)
+    k0, p0 = n_items(), len(L.packs())
+    w._test_newpack = (False, None); w.collect(h); app.processEvents()
+    assert n_items() == k0 and len(L.packs()) == p0, "取消新建却收了 / 建了包"
+    # --- 确认新建，放进选的文件夹
+    fA = L.ensure_folder_path("NCE1/L1-L2")
+    w._test_newpack = (True, fA); w.collect(h); app.processEvents()
+    ids = L.packs_named("whose … is it")
+    assert len(ids) == 1 and L.pack_path(ids[0]) == ["NCE1", "L1-L2", "whose … is it"] and L.pack_count(ids[0]) == 1, \
+        f"确认新建不对：{[L.pack_path(i) for i in ids]}"
+    pa = ids[0]
+    # --- 大小写 / 空白 / ... ≡ …：直接收进已有的包，不弹框、不新建
+    w._test_newpack = (False, None)
+    w.q.setText("  WHOSE   ...  is IT "); w.do_search(); app.processEvents()
+    assert w.fav_pack_id == pa and "NCE1" in w.pack_btn_w.text(), f"同名包没认出来：{w.fav_pack_id} {w.pack_btn_w.text()}"
+    p0 = len(L.packs()); w.collect(h); app.processEvents()
+    assert len(L.packs()) == p0 and L.pack_count(pa) == 1, "同名包又新建了一个"
+    # --- 多个同名包：用最近用过的；收藏到弹窗只列同名的
+    other = L.create_pack("something else", fA)
+    pb = L.create_pack("Whose... is it", None)
+    assert pb and L.pack(pb)["name"] == "Whose… is it", "新建包名三点没转成 …"
+    L.touch_recent_pack(pb)
+    w.do_search(); app.processEvents()
+    assert w.fav_pack_id == pb, f"多个同名包没取最近用过的：{w.fav_pack_id} pa={pa} pb={pb} {L.packs_named(w.active_pattern or '')} {L.get_setting('recent_packs')} {w.active_pattern!r} {w.q.text()!r}"
+    w._open_picker(); app.processEvents()
+    lst = [w.pack_picker.lst.item(i).data(Qt.UserRole) for i in range(w.pack_picker.lst.count())]
+    w.pack_picker.hide()
+    assert sorted(lst) == sorted([pa, pb]), f"收藏到弹窗应只列同名包：{lst}"
+    w._fav_pick(pa); assert w.fav_pack_id == pa, "弹窗切换同名包失败"
+    w._fav_pick(other); assert w.fav_pack_id == pa, "竟然能指向名字不同的包"
+    w.collect(h)
+    assert L.pack_count(pb) == 0 and L.pack_count(other) == 0, "收进了别的包"
+    # --- 搜索框空 / 改了没搜 / 链接打开：禁用
+    w.q.setText(""); app.processEvents()
+    assert w.active_pattern is None and not w.b_fav.isEnabled() and not w.pack_btn_w.isEnabled(), "空搜索时收藏没禁用"
+    assert "先搜索句型" in w.b_fav.toolTip() and "先搜索句型" in w.pack_btn_w.text(), "没提示先搜索句型"
+    k0 = n_items(); w.collect(h); assert n_items() == k0, "空搜索时还能收藏"
+    w.q.setText("whose ... is it"); w.do_search(); w.q.setText("whose ... is it now"); app.processEvents()
+    assert not w.b_fav.isEnabled(), "搜索框改了没搜，收藏应先禁用"
+    w.q.setText(w.link_of(h)); w.do_search(); app.processEvents()
+    assert w.active_pattern is None and not w.b_fav.isEnabled(), "链接打开时收藏应禁用"
+    w._test_newpack = None
+    # --- 采集包页：树、重命名、重名拦截、删除确认
+    w._test_warn = []
+    w.refresh_packs((K_PACK, pa)); app.processEvents()   # 不切页：切页会换播放器的画面输出
+    assert w.pack_tree.current() == ("p", pa) and w.pack_list.count() == 1 and "NCE1" in w.pack_crumb.text(), "树 / 面包屑不对"
+    from PySide6.QtWidgets import QInputDialog as _QID
+    _orig = _QID.getText
+    try:
+        _QID.getText = staticmethod(lambda *a, **k: ("改名测试包", True)); w.rename_pack()
+        assert L.pack(pa)["name"] == "改名测试包", "采集包重命名失败"
+        _QID.getText = staticmethod(lambda *a, **k: ("SOMETHING  else", True)); w.rename_pack()
+        assert L.pack(pa)["name"] == "改名测试包" and w._test_warn, "同文件夹重名没拦住"
+    finally:
+        _QID.getText = _orig
+    # 名字改了 → 不再是「whose … is it」的收藏目标
+    w.q.setText("whose ... is it"); w.do_search(); app.processEvents()
+    assert w.fav_pack_id == pb, "改名后的包还被当成同名包"
+    L.save_adjust(h.media_key, h.idx, h.start + 0.05, h.end)
+    w.refresh_packs((K_PACK, pa))
+    w._test_confirm = False; w.delete_pack()
+    assert L.pack(pa), "点了取消却删了包"
+    w._test_confirm = True; w.delete_pack()
+    assert not L.pack(pa) and not L.db.execute("SELECT 1 FROM pack_items WHERE pack_id=?", (pa,)).fetchone(), "包没删掉"
+    assert L.db.execute("SELECT 1 FROM adjust WHERE media_key=? AND idx=?", (h.media_key, h.idx)).fetchone(), "删包误删了微调"
+    # --- 文件夹：防套娃、移动、删除非空（确认里说清数量）
+    nce = L.find_folder("nce1")
+    assert not L.move_folder(nce, fA) and not L.move_folder(nce, nce), "能把文件夹挪进自己 / 子孙"
+    sub = L.create_folder("L3-L4", nce)
+    assert L.move_pack(pb, sub) and L.pack_path(pb) == ["NCE1", "L3-L4", "Whose… is it"], "挪包失败"
+    assert L.move_folder(sub, None) and L.folder_path(sub) == ["L3-L4"], "挪文件夹失败"
+    assert L.move_folder(sub, nce, 0) and [f["name"] for f in L.folders() if f["parent_id"] == nce][0] == "L3-L4", "排序没生效"
+    st = L.folder_stats(nce)
+    assert st["folders"] == 2 and st["packs"] == 2, f"文件夹统计不对：{st}"
+    # --- 导出整个文件夹：导出根/文件夹层级/包名/*.mp4，没有说明 / manifest / 预设名那一层
+    w.lib.add_to_pack(pb, h.media_key, h.idx, "whose … is it", h.tier)
+    L.db.execute("UPDATE packs SET name=? WHERE id=?", ("is: this/his…?", other)); L.db.commit()
+    w.lib.add_to_pack(other, h.media_key, h.idx, "x", h.tier)
+    od = Path(root) / "我的导出"
+    w.refresh_packs((K_FOLDER, nce)); w._test_export = str(od / "NCE1")
+    w.export_pack(); w._test_export = None
+    for ew in list(w.export_workers):
+        ew.wait(120000)
+    app.processEvents()
+    files = sorted(p.relative_to(od).as_posix() for p in od.rglob("*") if p.is_file())
+    want = clip_name(h.en) + ".mp4"
+    assert files == sorted([f"NCE1/L3-L4/Whose… is it/{want}", f"NCE1/L1-L2/is this his…/{want}"]), f"导出目录结构不对：{files}"
+    assert not list(od.rglob("说明")) and not list(od.rglob("manifest.json")) and not list(od.rglob("横屏原画*")), "还有说明 / manifest"
+    assert any(x == (od / "NCE1").resolve() for x in L.export_dirs()), "导出文件夹没记下（会被扫进媒体库）"
+    w._test_confirm = None
+    # --- 删除非空文件夹：一起删
+    w._test_confirm = True; w.refresh_packs((K_FOLDER, nce)); w.delete_pack(); w._test_confirm = None
+    assert not L.folder(nce) and not L.pack(pb) and not L.pack(other) and not L.folder(sub), "非空文件夹没删干净"
+    # --- 旧库迁移：包名 UNIQUE 的老表 → 全部放最外层
+    d = tempfile.mkdtemp(prefix="clipper-mig-"); os.makedirs(os.path.join(d, ".clipper"))
+    db = sqlite3.connect(os.path.join(d, ".clipper", "library.db"))
+    db.executescript("CREATE TABLE packs(id INTEGER PRIMARY KEY, name TEXT UNIQUE, created REAL);"
+                     "INSERT INTO packs VALUES(1,'is this your…',1),(2,'is this his…',2);")
+    db.commit(); db.close()
+    M = Library(d)
+    ps = M.packs()
+    assert [(p["name"], p["folder_id"]) for p in ps] == [("is this your…", None), ("is this his…", None)], "旧库迁移不对"
+    f1 = M.create_folder("NCE1")
+    assert M.create_pack("is this your…", f1), "迁移后同名包不能放进别的文件夹"
+    M.db.close()
+
+
+def _wave_tests(w, app):
+    """1.3.4：整集缩略音轨读出并渲染；dpr=2 时灰 / 青两层波形都只在波形格内。"""
+    import numpy as np, time
+    from PySide6.QtGui import QColor
+    from clipper.ui.widgets import WaveformView
+    for _ in range(200):
+        if w.dmap.env is not None:
+            break
+        app.processEvents(); time.sleep(0.05)
+    for ow in list(w._ov_workers):
+        ow.wait(60000)
+    app.processEvents()
+    assert w.dmap.env is not None and len(w.dmap.env) > 500, "整集包络没读出来"
+    cache = list((w.lib.data / "wave").glob("*.ov200.*.u8"))
+    assert cache, "整集包络没缓存"
+    w.dmap.set_view(1.0, 2.0); w.dmap.set_playhead(1.5)
+    img = w.dmap.grab().toImage()
+    assert img.width() > 100 and w.dmap.height() >= 56, "缩略音轨没画出来"
+    v = WaveformView(); v.resize(600, 200)
+    t = np.arange(8000 * 4) / 8000.0
+    v.set_data(0.0, 4.0, [dict(w="hello", start=1.0, end=1.5)], [(0.5, 3.0, "Hello there", 1, "sub")], (0.5, 3.0), (1.0, 3.0))
+    v.set_samples((np.sin(t * 2 * np.pi * 200) * 0.9).astype(np.float32), 0.0)
+    v._set_view(0.0, 4.0, emit=False)
+    top, bottom = v._geom()
+    for dpr in (1.0, 2.0):
+        base, teal = v._build_cache(dpr)
+        assert abs(base.devicePixelRatio() - dpr) < 1e-6 and abs(teal.devicePixelRatio() - dpr) < 1e-6, "位图 dpr 不一致"
+        bi, ti = base.toImage(), teal.toImage()
+        gray = QColor("#475569").rgb() & 0xFFFFFF
+        rows_in, rows_out = 0, 0
+        for y in range(bi.height()):
+            yl = y / dpr
+            cnt = sum(1 for x in range(0, bi.width(), 7) if (bi.pixel(x, y) & 0xFFFFFF) == gray)
+            if top - 1 <= yl <= bottom + 1:
+                rows_in += cnt > 0
+            else:
+                rows_out += cnt
+        assert rows_in > 10 and rows_out == 0, f"dpr={dpr} 灰色波形溢出到波形格外：{rows_out}"
+        out_t = sum(1 for y in range(ti.height()) if not (top - 1 <= y / dpr <= bottom + 1)
+                    for x in range(0, ti.width(), 7) if (ti.pixel(x, y) >> 24) > 0)
+        assert out_t == 0, f"dpr={dpr} 青色波形溢出：{out_t}"
+    v.deleteLater()
 
 
 def selftest(out, smoke_wav=None):
@@ -386,6 +566,7 @@ def selftest(out, smoke_wav=None):
         import clipper.ui.aligncenter  # noqa
         return "ok"
     chk("qt+multimedia+ui", qt)
+    chk("搜索排名（1.3.4）", _rank_tests)
     chk("界面：顶栏/页面/搜索/工作台/链接/无损导出", _ui_test)
     def mp_lock():
         lk = multiprocessing.RLock()   # 会拉起 resource_tracker 子进程；没处理好就会重开整个程序

@@ -290,3 +290,20 @@ def unique_path(f: Path) -> Path:
 def safe_name(s: str) -> str:
     s = re.sub(r'[\\/:*?"<>|]+', " ", s).strip()
     return re.sub(r"\s+", "_", s)[:60]
+
+
+_WIN_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+
+
+def dir_name(s: str, limit: int = 120) -> str:
+    """文件夹 / 采集包名 → 能当文件夹名用：/ \\ : * ? " < > | 换成空格，末尾的点和空格去掉（Windows），保留「…」。"""
+    s = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", s or "")
+    s = s.replace("／", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    if len(s) > limit:
+        s = s[:limit]
+    s = s.rstrip(" .")
+    if s.split(".")[0].lower() in _WIN_RESERVED:
+        s = "_" + s
+    return s or "未命名"
+

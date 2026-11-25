@@ -145,10 +145,11 @@ class ExportWorker(QThread):
     progress = Signal(int, int, str)
     finished_ok = Signal(dict)
 
-    def __init__(self, root, items_spec, out_dir, presets, style: Style, make_comp=True, pack_id=None):
+    def __init__(self, root, items_spec, out_dir, presets, style: Style, make_comp=True, pack_id=None, pack_jobs=None):
         super().__init__()
         self.root, self.items_spec, self.out_dir = root, items_spec, Path(out_dir)
         self.presets, self.style, self.make_comp, self.pack_id = presets, style, make_comp, pack_id
+        self.pack_jobs = pack_jobs          # 1.3.4：导出整个文件夹 = [(包 id, 输出目录)]
         self._cancel = False
 
     def cancel(self):
@@ -157,6 +158,13 @@ class ExportWorker(QThread):
     def run(self):
         try:
             lib = Library(self.root)
+            if self.pack_jobs:
+                r = jobs.export_packs(lib, self.pack_jobs, self.presets, self.style,
+                                      progress=lambda n, t, s: self.progress.emit(n, t, s),
+                                      cancel=lambda: self._cancel)
+                r["out"] = str(self.out_dir)
+                self.finished_ok.emit(r)
+                return
             if self.pack_id is not None:
                 items = jobs.pack_to_items(lib, self.pack_id)
             else:
@@ -175,6 +183,22 @@ class ExportWorker(QThread):
             self.finished_ok.emit(r)
         except Exception as ex:
             self.finished_ok.emit(dict(ok=False, errors=[str(ex)], out=str(self.out_dir)))
+
+
+class OverviewWorker(QThread):
+    """1.3.4：整集缩略音轨的包络（后台一次读完并缓存）。"""
+    done = Signal(int, object)
+
+    def __init__(self, token, cache_dir, key, video):
+        super().__init__()
+        self.token, self.cache_dir, self.key, self.video = token, cache_dir, key, video
+
+    def run(self):
+        try:
+            env = wave.overview_cached(self.cache_dir, self.key, self.video)
+        except Exception:
+            env = None
+        self.done.emit(self.token, env)
 
 
 class WaveWorker(QThread):

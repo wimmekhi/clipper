@@ -549,8 +549,11 @@ class WaveformView(QWidget):
                     img = np.zeros((PH, PW), dtype=np.uint32)
                     img[mask] = (0xFF << 24) | (c.red() << 16) | (c.green() << 8) | c.blue()
                     qi = QImage(img.data, PW, PH, PW * 4, QImage.Format_ARGB32_Premultiplied).copy()
+                    # 1.3.4：位图按物理像素算的，标上同样的 devicePixelRatio，再按逻辑尺寸画进去
+                    # （1.3.3 用 resetTransform 画 dpr=1 的图，Retina 上被放大成 2 倍，压到下面的词和刻度）
+                    qi.setDevicePixelRatio(dpr)
                     if which == "base":
-                        p.save(); p.resetTransform(); p.drawImage(0, 0, qi); p.restore()
+                        p.drawImage(QRectF(0, 0, PW / dpr, PH / dpr), qi)
                     else:
                         teal = QPixmap.fromImage(qi); teal.setDevicePixelRatio(dpr)
         else:
@@ -828,6 +831,196 @@ class DialogueMap(QWidget):
     def mousePressEvent(self, e):
         t = (e.position().x() - 8) / max(1, self.width() - 16) * self.dur
         self.seek.emit(max(0.0, min(self.dur, t)))
+
+
+class OverviewTrack(QWidget):
+    """1.3.4：整集缩略音轨（PR 式）：对称灰色包络；青框 = 上面大波形正在看的那段；红线 = 播放头。
+    点哪儿跳哪儿；拖青框平移；滚轮平移。整集包络读完之前先显示原来的说话条。"""
+    seek = Signal(float)
+    pan = Signal(float)            # 拖青框：新的可见范围起点
+    pan_done = Signal(float)       # 松手：可见范围中心
+    scroll = Signal(float)         # 滚轮：格数（正 = 往后）
+
+    LEFT = 66
+    LABEL = "整集音轨"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(62)
+        self.dur = 1.0
+        self.lines = []
+        self.env = None            # 0..1 振幅，rate 点/秒
+        self.rate = 200.0
+        self.view = None
+        self.playhead = None
+        self._cache = None
+        self._gen = 0
+        self._drag = None
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMouseTracking(True)
+
+    # 兼容 DialogueMap 的接口
+    def set_data(self, dur, lines):
+        self.dur = max(1.0, dur)
+        self.lines = lines
+        self.env = None
+        self._gen += 1
+        self.update()
+
+    def set_envelope(self, env, rate=200.0):
+        self.env = None if env is None or not len(env) else np.asarray(env, dtype=np.float32)
+        self.rate = float(rate)
+        if self.env is not None:
+            self.dur = max(self.dur if not self.lines else 1.0, len(self.env) / self.rate, 1.0)
+        self._gen += 1
+        self.update()
+
+    def set_view(self, a, b):
+        self.view = (a, b); self.update()
+
+    def set_playhead(self, t):
+        old = self.playhead
+        self.playhead = t
+        H = self.height()
+        for v in (old, t):
+            if v is not None:
+                x = self.x_of(v)
+                self.update(QRect(int(x) - 3, 0, 7, H))
+
+    # 坐标
+    def _box(self):
+        return QRectF(self.LEFT, 2, max(10, self.width() - self.LEFT - 4), self.height() - 18)
+
+    def x_of(self, t):
+        b = self._box()
+        return b.left() + 6 + t / self.dur * (b.width() - 12)
+
+    def t_of(self, x):
+        b = self._box()
+        return max(0.0, min(self.dur, (x - b.left() - 6) / max(1, b.width() - 12) * self.dur))
+
+    def _build(self, dpr):
+        W, H = self.width(), self.height()
+        pm = QPixmap(max(1, int(W * dpr)), max(1, int(H * dpr))); pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm); p.setRenderHint(QPainter.Antialiasing)
+        b = self._box()
+        f = QFont(); f.setPointSize(9); p.setFont(f); p.setPen(QColor("#475569"))
+        p.drawText(QRectF(0, b.top(), self.LEFT - 8, b.height()), Qt.AlignVCenter | Qt.AlignLeft, self.LABEL)
+        bg = QPainterPath(); bg.addRoundedRect(b, 8, 8)
+        p.fillPath(bg, QColor(255, 255, 255, 215))
+        p.setPen(QPen(QColor(203, 213, 225), 1)); p.drawPath(bg)
+        mid = b.center().y()
+        hw = b.height() / 2 - 4
+        x0, x1 = self.x_of(0), self.x_of(self.dur)
+        if self.env is not None:
+            n = max(2, int((x1 - x0) * dpr))
+            e = self.env
+            edges = np.linspace(0, len(e), n + 1).astype(np.int64)
+            ok = edges[1:] > edges[:-1]
+            amp = np.zeros(n, dtype=np.float32)
+            if ok.any():
+                amp[ok] = np.maximum.reduceat(e, edges[:-1][ok])
+            m = float(amp.max()) or 1.0
+            amp = np.maximum(amp / m * hw, 0.4)
+            xs = x0 + (np.arange(n) + 0.5) / dpr
+            path = QPainterPath()
+            path.moveTo(float(xs[0]), mid - float(amp[0]))
+            for x, a in zip(xs[1:].tolist(), amp[1:].tolist()):
+                path.lineTo(x, mid - a)
+            for x, a in zip(xs[::-1].tolist(), amp[::-1].tolist()):
+                path.lineTo(x, mid + a)
+            path.closeSubpath()
+            p.setPen(Qt.NoPen); p.setBrush(QColor("#94A3B8")); p.drawPath(path)
+        else:
+            # 整集波形还没读完：先画说话条（每条台词一根竖线）
+            for (s, e, src) in self.lines:
+                x = self.x_of(s)
+                p.setPen(QPen(QColor("#8B5CF6") if src == "auto" else QColor("#CBD5E1"), 1.2))
+                p.drawLine(QPointF(x, mid - hw * 0.6), QPointF(x, mid + hw * 0.6))
+        p.setPen(QPen(QColor(15, 23, 42, 20), 1)); p.drawLine(QPointF(x0, mid), QPointF(x1, mid))
+        f2 = QFont(MONO.split(",")[0]); f2.setPointSize(8); p.setFont(f2); p.setPen(QColor("#64748B"))
+        p.drawText(QRectF(b.left(), H - 15, 90, 14), Qt.AlignLeft | Qt.AlignVCenter, "0:00")
+        p.drawText(QRectF(b.right() - 90, H - 15, 90, 14), Qt.AlignRight | Qt.AlignVCenter, fmt_short(self.dur))
+        p.end()
+        return pm
+
+    def _view_rect(self):
+        if not self.view:
+            return None
+        b = self._box()
+        a, c = self.x_of(self.view[0]), self.x_of(self.view[1])
+        w = max(6.0, c - a)
+        m = (a + c) / 2
+        return QRectF(m - w / 2, b.top() + 2, w, b.height() - 4)
+
+    def paintEvent(self, ev):
+        dpr = self.devicePixelRatioF()
+        key = (self._gen, self.width(), self.height(), dpr, self.dur)
+        if self._cache is None or self._cache[0] != key:
+            self._cache = (key, self._build(dpr))
+        p = QPainter(self)
+        p.setClipRegion(ev.region())
+        p.drawPixmap(0, 0, self._cache[1])
+        p.setRenderHint(QPainter.Antialiasing)
+        r = self._view_rect()
+        if r is not None:
+            p.setPen(QPen(QColor("#0D9488"), 1.6)); p.setBrush(QColor(45, 212, 191, 110))
+            p.drawRoundedRect(r, 3, 3)
+        if self.playhead is not None:
+            b = self._box()
+            x = self.x_of(self.playhead)
+            p.setPen(QPen(QColor("#F43F5E"), 1.5)); p.drawLine(QPointF(x, b.top()), QPointF(x, b.bottom()))
+        p.end()
+
+    def mousePressEvent(self, e):
+        x = e.position().x()
+        r = self._view_rect()
+        if r is not None and r.left() - 3 <= x <= r.right() + 3 and self.view:
+            self._drag = ("box", x, self.view[0], self.view[1])
+        else:
+            self._drag = ("click", x)
+
+    def mouseMoveEvent(self, e):
+        x = e.position().x()
+        d = self._drag
+        if d is None:
+            r = self._view_rect()
+            self.setCursor(Qt.OpenHandCursor if r is not None and r.left() - 3 <= x <= r.right() + 3
+                           else Qt.PointingHandCursor)
+            return
+        if d[0] == "box":
+            dt = (x - d[1]) / max(1, self._box().width() - 12) * self.dur
+            a = max(0.0, min(self.dur - (d[3] - d[2]), d[2] + dt))
+            self.view = (a, a + d[3] - d[2])
+            self.update()
+            self.pan.emit(a)
+
+    def mouseReleaseEvent(self, e):
+        d = self._drag
+        self._drag = None
+        if d is None:
+            return
+        x = e.position().x()
+        if d[0] == "box":
+            if abs(x - d[1]) < 3:
+                self.seek.emit(self.t_of(x))
+            elif self.view:
+                self.pan_done.emit((self.view[0] + self.view[1]) / 2)
+        else:
+            self.seek.emit(self.t_of(x))
+
+    def wheelEvent(self, e):
+        pd = e.pixelDelta()
+        if not pd.isNull():
+            dx = pd.x() if abs(pd.x()) > abs(pd.y()) else pd.y()
+            self.scroll.emit(-dx / 40.0)
+        else:
+            ad = e.angleDelta()
+            dy = ad.y() or ad.x()
+            if dy:
+                self.scroll.emit(-dy / 120.0)
+        e.accept()
 
 
 def tag(text, color="#64748B", solid=False):

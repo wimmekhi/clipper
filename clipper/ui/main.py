@@ -28,9 +28,10 @@ from ..paths import VERSION, icon_path, ALIGN_UI
 from ..library import Library, JOIN_BASE, AUTO_BASE, INDEX_VER
 from ..search import Searcher, Hit, TIER_ORIG, TIER_NEAR, TIER_FUNC, _tier_rank
 from ..export import Style, clip_name
-from .widgets import (WaveformView, DialogueMap, GroupHeader, ResultRow, fmt_ms, fmt_short, highlight_html,
+from .widgets import (WaveformView, OverviewTrack, GroupHeader, ResultRow, fmt_ms, fmt_short, highlight_html,
                       TIMING_TEXT, FlowLayout, tag, MONO, TagDelegate, Toast, star_pop)
-from .workers import ScanWorker, AlignWorker, ExportWorker, WaveWorker, UpdateCheck, UpdateDownload
+from .workers import ScanWorker, AlignWorker, ExportWorker, WaveWorker, OverviewWorker, UpdateCheck, UpdateDownload
+from .packs import PackTree, PackItemList, PackPicker, NewPackDialog, path_text, SEP, K_FOLDER, K_PACK
 from .dialogs import SettingsDialog, ExportDialog
 from . import theme
 from .theme import icon
@@ -101,6 +102,11 @@ class MainWindow(QMainWindow):
         self.cur = None            # 当前片段 hit
         self.cur_span = None
         self.ws_media = None       # 工作台当前这一集（media 行）
+        self.active_pattern = None  # 1.3.4：当前搜索的句型 = 收藏目标包名（链接打开 / 搜索框改了没搜 → None）
+        self.fav_pack_id = None     # 和句型同名的包（几个同名时 = 最近用过的那个）
+        self.page_sel = None        # 采集包页树里选中的 (kind, id)
+        self._ov_token = 0
+        self._ov_workers = []
         self.script_rows = []
         self._script_starts = []
         self.align_worker = None
@@ -170,6 +176,7 @@ class MainWindow(QMainWindow):
         self.q = QLineEdit(); self.q.setObjectName("topsearch")
         self.q.setPlaceholderText("搜索台词或句型，例如 whose * is this")
         self.q.returnPressed.connect(self.do_search)
+        self.q.textChanged.connect(self._q_edited)
         self.q.setMinimumWidth(160)
         bh.addWidget(self.q, 1)
         kb = label("/", "kbd"); kb.setToolTip("按 / 跳到搜索框"); bh.addWidget(kb)
@@ -509,7 +516,7 @@ class MainWindow(QMainWindow):
         self.pack_btn_w = self._pack_button()
         r2.addWidget(self.pack_btn_w)
         self.pack_n_lb = label("0 条", "muted"); self.pack_n_lb.setToolTip("当前采集包里已有几条")
-        self.b_fav = btn("收藏", "star", lambda: self._cur_do(self.collect), tip="收藏到当前采集包（Ctrl+D）")
+        self.b_fav = btn("收藏", "star", lambda: self._cur_do(self.collect), tip="收藏到和搜索句型同名的采集包（Ctrl+D）")
         self.pack_n_lb.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         self.pack_n_lb.setFixedHeight(self.b_fav.sizeHint().height())
         r2.addWidget(self.pack_n_lb)
@@ -525,8 +532,13 @@ class MainWindow(QMainWindow):
         self.cut_lb = label("", "small", True); ev.addWidget(self.cut_lb)
         self.wave.setToolTip("拖两端改切点（自动保存，收藏 / 导出都按调好的范围）；空白处拖出新选区；单击从那里播放；"
                              "Shift 点台词条加选；滚轮平移，Ctrl/⌘+滚轮缩放；I / O 设入出点，U 选到虚线")
-        self.dmap = DialogueMap(); self.dmap.seek.connect(self._map_seek)
-        self.dmap.setToolTip("整集的说话分布（紫色是识别补出的）；点哪儿跳到哪儿")
+        # 1.3.4：整集缩略音轨（替换原来的竖线说话地图）
+        self.dmap = OverviewTrack()
+        self.dmap.seek.connect(self._map_seek)
+        self.dmap.pan.connect(self._ov_pan)
+        self.dmap.pan_done.connect(self._ov_pan_done)
+        self.dmap.scroll.connect(self._ov_scroll)
+        self.dmap.setToolTip("整集音轨：青框 = 上面大波形正在看的那段；点哪儿跳到哪儿，拖青框平移，滚轮平移")
         ev.addWidget(self.dmap)
         ew.setMinimumHeight(330)      # 两行按钮在窄窗口会折行，留够高度免得波形和文字叠在一起
         left.addWidget(ew)
@@ -539,31 +551,68 @@ class MainWindow(QMainWindow):
         v.addWidget(sp, 1)
         return page
 
-    # ------------------------------------------------------------ 采集包页
+    # ------------------------------------------------------------ 采集包页（1.3.4：文件浏览器）
     def _page_packs(self):
         page = QWidget(); v = QVBoxLayout(page); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(10)
-        hd = QHBoxLayout(); hd.setSpacing(8)
-        hd.addWidget(label("采集包", "h1"))
-        self.pack_cb = QComboBox(); self.pack_cb.setMinimumWidth(220)
-        self.pack_cb.currentIndexChanged.connect(lambda _: (self.load_pack(), self._sync_pack_buttons()))
-        hd.addWidget(self.pack_cb)
-        hd.addWidget(btn("新建", "newpack", self.new_pack, tip="Ctrl+N"))
-        self.b_pack_ren = btn("重命名", "edit", self.rename_pack, "ghost", "给当前采集包改名")
-        self.b_pack_del = btn("删除包", "trash", self.delete_pack, "ghost",
-                              "删除当前采集包（只删包，不碰视频和已导出的文件）")
-        hd.addWidget(self.b_pack_ren); hd.addWidget(self.b_pack_del)
-        hd.addStretch(1)
-        for t, fn in (("上移", lambda: self._pack_move(-1)), ("下移", lambda: self._pack_move(1)),
-                      ("移除", self._pack_remove)):
-            hd.addWidget(btn(t, None, fn, "ghost"))
-        hd.addWidget(btn("导出此包", "package", self.export_pack, "primary", "Ctrl+Shift+E"))
-        v.addLayout(hd)
-        v.addWidget(label("包里的片段按顺序导出，可拼成合集长视频。双击一条在剪辑页打开。", "muted"))
-        w, pv = panel((6, 6, 6, 6))
-        self.pack_list = QListWidget(); self.pack_list.setObjectName("script"); self.pack_list.setWordWrap(True)
+        sp = QSplitter(Qt.Horizontal); sp.setObjectName("split134/packs"); sp.setChildrenCollapsible(False)
+        lw, lv = panel((12, 12, 12, 12), 8)
+        hd = QHBoxLayout(); hd.setSpacing(6)
+        hd.addWidget(label("采集包", "h1"), 1)
+        hd.addWidget(btn("文件夹", "plus", self.new_folder, "ghost", "在选中的文件夹里新建文件夹"))
+        hd.addWidget(btn("采集包", "plus", self.new_pack, "ghost", "在选中的文件夹里新建采集包（Ctrl+N）"))
+        more = QToolButton(); more.setText("⋯"); more.setObjectName("topbtn"); more.setPopupMode(QToolButton.InstantPopup)
+        more.setStyleSheet("QToolButton::menu-indicator{image:none;width:0;}")
+        mm = QMenu(more)
+        mm.addAction("展开全部", lambda: self.pack_tree.expandAll())
+        mm.addAction("折叠全部", lambda: self.pack_tree.collapseAll())
+        mm.addSeparator()
+        mm.addAction("重命名…", self.rename_pack)
+        mm.addAction("删除…", self.delete_pack)
+        mm.addAction("导出…", self.export_pack)
+        more.setMenu(mm)
+        hd.addWidget(more)
+        lv.addLayout(hd)
+        self.pack_filter = QLineEdit(); self.pack_filter.setPlaceholderText("筛选包名 / 文件夹…")
+        self.pack_filter.setClearButtonEnabled(True)
+        self.pack_filter.textChanged.connect(lambda t: self.pack_tree.apply_filter(t))
+        lv.addWidget(self.pack_filter)
+        self.pack_tree = PackTree()
+        self.pack_tree.currentItemChanged.connect(lambda *_: self.load_pack())
+        self.pack_tree.moved.connect(self._tree_moved)
+        self.pack_tree.customContextMenuRequested.connect(self._tree_menu)
+        self.pack_tree.itemDoubleClicked.connect(lambda it, c: None)
+        lv.addWidget(self.pack_tree, 1)
+        lv.addWidget(label("拖动换位置；右键新建 / 重命名 / 删除 / 导出", "muted"))
+        lw.setMinimumWidth(260)
+        sp.addWidget(lw)
+        rw, rv = panel((12, 12, 12, 12), 8)
+        rh = QHBoxLayout(); rh.setSpacing(6)
+        self.pack_crumb = label("", "muted")
+        self.pack_title = label("", "h2")
+        self.pack_meta = label("", "muted")
+        for lb_ in (self.pack_crumb, self.pack_title, self.pack_meta):   # 名字太长不撑宽窗口
+            lb_.setMinimumWidth(20)
+        rh.addWidget(self.pack_crumb); rh.addWidget(self.pack_title); rh.addWidget(self.pack_meta); rh.addStretch(1)
+        self.b_pack_up = btn("上移", None, lambda: self._pack_move(-1), "ghost")
+        self.b_pack_down = btn("下移", None, lambda: self._pack_move(1), "ghost")
+        self.b_pack_rm = btn("移除", None, self._pack_remove, "ghost", "从包里移除选中的片段（不删视频）")
+        self.b_pack_export = btn("导出此包", "package", self.export_pack, "primary", "Ctrl+Shift+E")
+        for b_ in (self.b_pack_up, self.b_pack_down, self.b_pack_rm, self.b_pack_export):
+            rh.addWidget(b_)
+        rv.addLayout(rh)
+        self.pack_list = PackItemList()
         self.pack_list.itemDoubleClicked.connect(self._pack_pick)
-        pv.addWidget(self.pack_list)
-        v.addWidget(w, 1)
+        self.pack_list.reordered.connect(self._pack_reordered)
+        rv.addWidget(self.pack_list, 1)
+        self.pack_hint = label("双击一条在剪辑页打开；拖动排序", "muted")
+        rv.addWidget(self.pack_hint)
+        sp.addWidget(rw)
+        sp.setStretchFactor(0, 1); sp.setStretchFactor(1, 2)
+        sp.setSizes([360, 820])
+        v.addWidget(sp, 1)
+        self.pack_picker = PackPicker(self)
+        self.pack_picker.picked.connect(self._fav_pick)
+        self.pack_picker.create.connect(self._fav_create_other)
         return page
 
     def _page_tasks(self):
@@ -581,35 +630,42 @@ class MainWindow(QMainWindow):
         return page
 
     def _pack_button(self):
-        b = QToolButton(); b.setObjectName("topbtn"); b.setPopupMode(QToolButton.InstantPopup)
+        b = QToolButton(); b.setObjectName("topbtn")
         b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         b.setIcon(icon("package", theme.ACCENT_D, 16)); b.setText("收藏到：—")
-        b.setStyleSheet("QToolButton::menu-indicator{image:none;width:0;}")
-        b.setToolTip("收藏进哪个采集包")
-        m = QMenu(b)
-        m.aboutToShow.connect(lambda m=m: self._fill_pack_menu(m))
-        b.setMenu(m)
+        b.setToolTip("收藏进和搜索句型同名的采集包")
+        b.clicked.connect(self._open_picker)
         return b
 
-    def _fill_pack_menu(self, m):
-        m.clear()
-        for i in range(self.pack_cb.count()):
-            a = m.addAction(self.pack_cb.itemText(i))
-            a.setCheckable(True); a.setChecked(i == self.pack_cb.currentIndex())
-            a.triggered.connect(lambda _=False, i=i: self.pack_cb.setCurrentIndex(i))
-        m.addSeparator()
-        m.addAction("新建采集包…", self.new_pack)
-
     def _sync_pack_buttons(self):
-        has = self.pack_cb.count() > 0
-        for b in (getattr(self, "b_pack_ren", None), getattr(self, "b_pack_del", None)):
-            if b is not None:
-                b.setEnabled(has)
-        name = self.pack_cb.currentText() or "—"
-        short = name if len(name) <= 16 else name[:15] + "…"
-        for b in (getattr(self, "pack_btn_s", None), getattr(self, "pack_btn_w", None)):
-            if b is not None:
-                b.setText(f"收藏到：{short}"); b.setToolTip(f"收藏进哪个采集包：{name}（点一下换）")
+        """「收藏到」按钮：显示和当前句型同名的包的完整路径；没有句型就禁用。"""
+        pat = self.active_pattern
+        b = getattr(self, "pack_btn_w", None)
+        if b is None:
+            return
+        fm = b.fontMetrics()
+        if not pat:
+            txt, tip = "收藏到：先搜索句型", "收藏目标 = 搜索的句型：先在顶上搜索框搜一个句型"
+        elif self.fav_pack_id is not None and self.lib and self.lib.pack(self.fav_pack_id):
+            path = self.lib.pack_path(self.fav_pack_id)
+            txt = "收藏到：" + path_text(path, 190, fm)
+            n_same = len(self.lib.packs_named(pat))
+            tip = f"收藏进：{SEP.join(path)}" + (f"（共有 {n_same} 个同名包，点一下切换）" if n_same > 1 else "")
+        else:
+            txt = "收藏到：" + path_text([pat], 150, fm) + "（新包）"
+            tip = f"还没有采集包「{pat}」：收藏时会先确认新建"
+        b.setText(txt); b.setToolTip(tip)
+        b.setEnabled(bool(pat))
+        fb = getattr(self, "b_fav", None)
+        if fb is not None:
+            fb.setEnabled(bool(pat))
+            fb.setToolTip("收藏到和搜索句型同名的采集包（Ctrl+D）" if pat else "先搜索句型")
+        for it, w in getattr(self, "rows", {}).values():
+            st = getattr(w, "star", None)
+            if st is not None:
+                st.setEnabled(bool(pat))
+                st.setToolTip("收藏到采集包「%s」（Ctrl+D）" % pat if pat else "先搜索句型")
+        self._sync_pack_count()
 
     # ================================================================== 菜单 / 快捷键
     def _act(self, text, fn, key=None, tip=None, icon=None, checkable=False):  # noqa: icon 是主题图标名
@@ -666,7 +722,7 @@ class MainWindow(QMainWindow):
         A["reset_cut"] = self._act("恢复自动切点", self.reset_cut)
         A["aud_in"] = self._act("试听开头 1 秒", self.audition_in)
         A["aud_out"] = self._act("试听结尾 1 秒", self.audition_out)
-        A["collect"] = self._act("收藏到当前包", lambda: self._cur_do(self.collect), "Ctrl+D", icon="collect")
+        A["collect"] = self._act("收藏到句型同名的包", lambda: self._cur_do(self.collect), "Ctrl+D", icon="collect")
         A["export_one"] = self._act("导出这一条…", lambda: self._cur_do(self.export_one), "Ctrl+E", icon="export")
         A["link"] = self._act("复制片段链接", lambda: self._cur_do(self.copy_link), "Ctrl+Shift+C", icon="link")
         for k in ("play", "prev", "next", "loop", None, "save_cut", "reset_cut", "aud_in", "aud_out", None,
@@ -679,14 +735,15 @@ class MainWindow(QMainWindow):
             a.setChecked(i == self.speed.currentIndex())
             a.triggered.connect(lambda _=False, i=i: self.speed.setCurrentIndex(i))
         pm = m.addMenu("采集包")
-        A["new_pack"] = self._act("新建采集包…", self.new_pack, "Ctrl+N", icon="newpack")
-        A["rename_pack"] = self._act("重命名当前采集包…", self.rename_pack, icon="edit")
-        A["delete_pack"] = self._act("删除当前采集包…", self.delete_pack, icon="trash")
+        A["new_pack"] = self._act("新建采集包…", lambda: self.new_pack(), "Ctrl+N", icon="newpack")
+        A["new_folder"] = self._act("新建文件夹…", lambda: self.new_folder(), icon="folder")
+        A["rename_pack"] = self._act("重命名选中的包 / 文件夹…", self.rename_pack, icon="edit")
+        A["delete_pack"] = self._act("删除选中的包 / 文件夹…", self.delete_pack, icon="trash")
         A["pack_up"] = self._act("选中条目上移", lambda: self._pack_move(-1))
         A["pack_down"] = self._act("选中条目下移", lambda: self._pack_move(1))
         A["pack_rm"] = self._act("移除选中条目", self._pack_remove)
-        A["export_pack"] = self._act("导出此包…", self.export_pack, "Ctrl+Shift+E", icon="package")
-        for k in ("new_pack", "rename_pack", "delete_pack", None, "pack_up", "pack_down", "pack_rm", None, "export_pack"):
+        A["export_pack"] = self._act("导出选中的包 / 文件夹…", self.export_pack, "Ctrl+Shift+E", icon="package")
+        for k in ("new_pack", "new_folder", "rename_pack", "delete_pack", None, "pack_up", "pack_down", "pack_rm", None, "export_pack"):
             pm.addSeparator() if k is None else pm.addAction(A[k])
         am = m.addMenu("对齐")
         A["align_center"] = self._act("对齐中心…", self.open_align_center, "Ctrl+L", "选集对齐、看进度和失败原因",
@@ -1241,8 +1298,10 @@ class MainWindow(QMainWindow):
             return
         m = LINK_RX.match(q)
         if m:
+            self._set_pattern(None)          # 链接打开：没有句型，不能收藏
             self.open_link(unquote(m.group(1)), int(m.group(2)))
             return
+        self._set_pattern(q)
         filters = {}
         if self.f_show.currentData():
             filters["shows"] = [self.f_show.currentData()]
@@ -1334,6 +1393,8 @@ class MainWindow(QMainWindow):
                 w.export_one.connect(self.export_one)
                 w.link.connect(self.copy_link)
                 w.checked.connect(self._row_checked)
+                if getattr(w, "star", None) is not None and not self.active_pattern:
+                    w.star.setEnabled(False); w.star.setToolTip("先搜索句型")
                 if h.cue_id in self.checked:
                     w.cb.setChecked(True)
                 if self.cur and h.cue_id == self.cur.cue_id:
@@ -1413,18 +1474,20 @@ class MainWindow(QMainWindow):
     def _batch_collect(self):
         if not self.checked:
             return
-        if self.pack_cb.count() == 0:
-            self.lib.pack_id(self.q.text().strip() or "未命名"); self.refresh_packs()
-        name = self.pack_cb.currentText()
-        n = sum(self.lib.add_to_pack(name, h.media_key, h.idx, self.q.text().strip(), h.tier)
-                for h in self.checked.values())
+        pid = self._fav_target()
+        if pid is None:
+            return
+        pat = self.active_pattern
+        n = sum(self.lib.add_to_pack(pid, h.media_key, h.idx, pat, h.tier) for h in self.checked.values())
+        self.lib.touch_recent_pack(pid)
         self._flush_cut()
         for h in self.checked.values():
             if h.cue_id in self.rows:
                 self.rows[h.cue_id][1].mark_collected()
+        name = SEP.join(self.lib.pack_path(pid))
         self.toast.pop(f"收藏了 {n} 条到「{name}」" + (f"（{len(self.checked) - n} 条本来就在）" if len(self.checked) - n else ""), n > 0)
         self.statusBar().showMessage(f"收藏了 {n} 条到「{name}」（{len(self.checked) - n} 条本来就在）", 4000)
-        self.load_pack()
+        self.refresh_packs()
 
     def _batch_export(self):
         self._flush_cut()
@@ -1523,6 +1586,7 @@ class MainWindow(QMainWindow):
             self.script.addItem(it)
         dur = m["duration"] or (max((r["end"] for r in rows), default=60) + 5)
         self.dmap.set_data(dur, [(t_of(r), r["a_end"] or r["end"], r["src"]) for r in rows])
+        self._load_overview(m)
         self._wave_lines = [(t_of(r), r["a_end"] if r["a_start"] is not None else r["end"], r["en"], r["idx"],
                              r["src"]) for r in rows]
         name = Path(m["rel_video"] or m["rel_sub"] or m["key"]).name
@@ -1549,6 +1613,7 @@ class MainWindow(QMainWindow):
         t0 = max(0.0, min(s, row["start"]) - 4)
         t1 = max(e, row["end"]) + 4
         self.wave.set_data(t0, t1, words, self._wave_lines, (row["start"], row["end"]), (s, e))
+        self._view_changed(self.wave.v0, self.wave.v1)      # 1.3.4：整集音轨的青框跟上
         self._update_cut_label(row, s, e, src)
         self._highlight_script(h.idx)
         if h.has_video:
@@ -1584,6 +1649,42 @@ class MainWindow(QMainWindow):
     def _view_changed(self, a, b):
         self.zoom_lb.setText(f"{b - a:.2f} 秒宽")
         self.dmap.set_view(a, b)
+
+    # ---------- 1.3.4 整集缩略音轨
+    def _load_overview(self, m):
+        """换集：后台用 ffmpeg 一次读出整集包络（缓存在 .clipper/wave），读完前显示说话条。"""
+        self._ov_token += 1
+        if not m["rel_video"]:
+            return
+        video = self.lib.abs(m["rel_video"])
+        if not video or not video.exists():
+            return
+        w = OverviewWorker(self._ov_token, str(self.lib.data / "wave"), m["key"], str(video))
+        w.done.connect(self._ov_done)
+        self._ov_workers.append(w)
+        w.finished.connect(lambda w=w: self._ov_workers.remove(w) if w in self._ov_workers else None)
+        w.start()
+
+    def _ov_done(self, token, env):
+        if token == self._ov_token and env is not None and len(env):
+            import numpy as _np
+            from ..wave import OV_RATE
+            self.dmap.set_envelope(_np.asarray(env, dtype=_np.float32) / 255.0, OV_RATE)
+
+    def _ov_pan(self, a):
+        """拖青框：大波形跟着平移（只能在已加载的那段里走，松手时超出就跳到那里的台词）。"""
+        w = self.wave.span()
+        self.wave._set_view(a, a + w)
+
+    def _ov_pan_done(self, center):
+        if not (self.wave.t0 <= center <= self.wave.t1):
+            self._map_seek(center)
+        else:
+            self.dmap.set_view(self.wave.v0, self.wave.v1)
+
+    def _ov_scroll(self, steps):
+        dt = steps * self.wave.span() * 0.12
+        self.wave._set_view(self.wave.v0 + dt, self.wave.v1 + dt)
 
     def _snap_changed(self):
         self.wave.snap = {k for k, c in self.snap_chips.items() if c.isChecked()}
@@ -1762,111 +1863,356 @@ class MainWindow(QMainWindow):
             self.refresh_current()
 
     # ================================================================== 采集包
-    def refresh_packs(self, select=None):
-        self.pack_cb.blockSignals(True)
-        cur = select or self.pack_cb.currentText()
-        self.pack_cb.clear()
-        for p in self.lib.packs():
-            self.pack_cb.addItem(p["name"], p["id"])
-        i = self.pack_cb.findText(cur) if cur else -1
-        self.pack_cb.setCurrentIndex(max(0, i))
-        self.pack_cb.blockSignals(False)
-        self.load_pack()
+    # ---------- 收藏目标 = 搜索句型（1.3.4 硬性：句型和包名一定对得上）
+    def _set_pattern(self, q):
+        q = (q or "").strip()
+        self.active_pattern = Library._clean_name(q) if q else None
+        self._searched_pattern = self.active_pattern
+        self.fav_pack_id = None              # 新搜索：同名包里取最近用过的那个
+        self._resolve_fav()
+
+    def _q_edited(self, text):
+        """搜索框改了但还没搜：收藏先禁用，免得收进和结果对不上的包。"""
+        if self.active_pattern and Library.norm_name(text) != Library.norm_name(self.active_pattern):
+            self.active_pattern = None
+            self._resolve_fav()
+        elif not self.active_pattern and getattr(self, "_searched_pattern", None) and \
+                Library.norm_name(text) == Library.norm_name(self._searched_pattern):
+            self.active_pattern = self._searched_pattern          # 改回刚才搜的那个：恢复
+            self._resolve_fav()
+
+    def _resolve_fav(self):
+        """按当前句型找同名包：已选的还同名就保留，否则取最近用过的那个；没有 = None（收藏时确认新建）。"""
+        pat = self.active_pattern
+        if not pat or not self.lib:
+            self.fav_pack_id = None
+        else:
+            ids = self.lib.packs_named(pat)
+            if self.fav_pack_id not in ids:
+                self.fav_pack_id = ids[0] if ids else None
         self._sync_pack_buttons()
 
-    def new_pack(self):
-        name, ok = QInputDialog.getText(self, "新建采集包", "包名（一般用句型，例如 What are you doing?）",
-                                        text=self.q.text().strip())
-        if ok and name.strip():
-            self.lib.pack_id(name.strip())
-            self.refresh_packs(name.strip())
+    def _default_new_folder(self):
+        """新包默认放进最近用过的包所在的文件夹，没有就最外层。"""
+        for pid in self.lib.recent_packs():
+            p = self.lib.pack(pid)
+            if p:
+                return p["folder_id"]
+        return None
 
-    def rename_pack(self):
-        pid = self.pack_cb.currentData()
-        if pid is None:
-            return
-        old = self.pack_cb.currentText()
-        name, ok = QInputDialog.getText(self, "重命名采集包", "新包名", text=old)
-        name = name.strip()
-        if not ok or not name or name == old:
-            return
-        if not self.lib.rename_pack(pid, name):
-            QMessageBox.warning(self, "重命名采集包", f"已经有叫「{name}」的采集包了，换个名字吧。")
-            return
-        self.refresh_packs(name)
-        self.toast.pop(f"已改名为「{name}」", True, "✓  ")
+    def _confirm_new_pack(self, name, folder=None, title="新建并收藏"):
+        """返回 (确认?, 文件夹 id)。自测可设 self._test_newpack = (bool, 文件夹 id 或 "default")。"""
+        default = self._default_new_folder() if folder is None else folder
+        t = getattr(self, "_test_newpack", None)
+        if t is not None:
+            ok, fid = t
+            return ok, (default if fid == "default" else fid)
+        dlg = NewPackDialog(self.lib, name, default, self, title)
+        ok = bool(dlg.exec())
+        fid = dlg.folder_id()
+        dlg.deleteLater()
+        return ok, fid
 
-    def delete_pack(self):
-        pid = self.pack_cb.currentData()
+    def _fav_target(self):
+        """收藏进哪个包（id）；没有句型 / 用户取消新建 → None。"""
+        pat = self.active_pattern
+        if not self.lib:
+            return None
+        if not pat:
+            self.toast.pop("先搜索句型：收藏会放进和句型同名的采集包", False)
+            return None
+        self._resolve_fav()
+        if self.fav_pack_id is not None:
+            return self.fav_pack_id
+        ok, fid = self._confirm_new_pack(pat)
+        if not ok:
+            return None
+        pid = self.lib.find_pack(pat, fid)
         if pid is None:
+            pid = self.lib.create_pack(pat, fid)
+        if pid is None:
+            return None
+        self.lib.touch_recent_pack(pid)
+        self.fav_pack_id = pid
+        self.refresh_packs(select=(K_PACK, pid) if self.page_sel is None else None)
+        return pid
+
+    def _open_picker(self):
+        pat = self.active_pattern
+        if not pat or not self.lib:
             return
-        name = self.pack_cb.currentText()
-        n = self.pack_list.count()
-        box = QMessageBox(QMessageBox.Warning, "删除采集包",
-                          f"确定删除采集包「{name}」吗？（里面有 {n} 条）",
-                          QMessageBox.NoButton, self)
-        box.setInformativeText("只删这个包和里面的条目列表，\n视频、字幕、选区和导出的文件都不动。\n删除后不能撤销。")
-        b_del = box.addButton("删除", QMessageBox.DestructiveRole)
-        box.addButton("取消", QMessageBox.RejectRole)
-        box.setDefaultButton(box.buttons()[-1])
-        if getattr(self, "_test_confirm", None) is not None:      # 自测用：不弹窗，直接给答案
-            yes = self._test_confirm
-        else:
-            box.exec(); yes = box.clickedButton() is b_del
-        if not yes:
+        ids = self.lib.packs_named(pat)
+        rec = set(self.lib.recent_packs())
+        ent = [(pid, self.lib.pack_path(pid), self.lib.pack_count(pid), pid in rec) for pid in ids]
+        self.pack_picker.fill(pat, ent, self.fav_pack_id)
+        self.pack_picker.popup_at(self.pack_btn_w)
+
+    def _fav_pick(self, pid):
+        """收藏到弹窗里选了一个同名包（只会列出同名的）。"""
+        if self.active_pattern and self.lib.pack(pid) and \
+                Library.norm_name(self.lib.pack(pid)["name"]) == Library.norm_name(self.active_pattern):
+            self.fav_pack_id = pid
+            self.lib.touch_recent_pack(pid)
+        self._sync_pack_buttons()
+
+    def _fav_create_other(self):
+        """在另一个文件夹里新建和句型同名的包，并设为收藏目标（不收藏）。"""
+        pat = self.active_pattern
+        if not pat:
             return
-        self.lib.delete_pack(pid)
-        self.refresh_packs()
-        self.toast.pop(f"已删除采集包「{name}」", True, "✓  ")
+        ok, fid = self._confirm_new_pack(pat, title="新建同名采集包")
+        if not ok:
+            return
+        pid = self.lib.find_pack(pat, fid)
+        if pid is None:
+            pid = self.lib.create_pack(pat, fid)
+        if pid is not None:
+            self.fav_pack_id = pid
+            self.lib.touch_recent_pack(pid)
+            self.refresh_packs()
 
     def collect(self, h):
         self._flush_cut()          # 先把调好的选区存下来，包里导出时按它切
-        if self.pack_cb.count() == 0:
-            self.lib.pack_id(self.q.text().strip() or "未命名")
-            self.refresh_packs()
-        name = self.pack_cb.currentText()
-        ok = self.lib.add_to_pack(name, h.media_key, h.idx, self.q.text().strip(), h.tier)
+        pid = self._fav_target()
+        if pid is None:
+            return
+        ok = self.lib.add_to_pack(pid, h.media_key, h.idx, self.active_pattern, h.tier)
+        self.lib.touch_recent_pack(pid)
+        name = SEP.join(self.lib.pack_path(pid))
         self.toast.pop(f"已收藏到「{name}」" if ok else f"这条已经在「{name}」里了", ok)
         if h.cue_id in self.rows:
             self.rows[h.cue_id][1].mark_collected()
         if self.cur and h.cue_id == self.cur.cue_id:
             star_pop(self.b_fav)
         self.statusBar().showMessage(f"已收藏到「{name}」" if ok else "这条已经在包里了", 2500)
-        self.load_pack()
+        self.refresh_packs()
 
+    # ---------- 采集包页：树
+    def refresh_packs(self, select=None):
+        if not self.lib:
+            return
+        sel = select or self.page_sel
+        self.pack_tree.blockSignals(True)
+        self.pack_tree.build(self.lib.folders(), self.lib.packs())
+        if self.pack_filter.text().strip():
+            self.pack_tree.apply_filter(self.pack_filter.text())
+        if sel and not self.pack_tree.select(*sel):
+            sel = None
+        if sel is None and self.pack_tree.topLevelItemCount():
+            self.pack_tree.setCurrentItem(self.pack_tree.topLevelItem(0))
+        self.pack_tree.blockSignals(False)
+        self.load_pack()
+        self._resolve_fav()
+
+    def _sel_folder(self):
+        """新建东西放哪：选中的是文件夹 → 它里面；选中包 → 包所在的文件夹；没选 → 最外层。"""
+        sel = self.pack_tree.current()
+        if not sel:
+            return None
+        if sel[0] == K_FOLDER:
+            return sel[1]
+        p = self.lib.pack(sel[1])
+        return p["folder_id"] if p else None
+
+    def new_folder(self, parent=False):
+        if not self.lib:
+            return
+        par = self._sel_folder() if parent is False else parent
+        name, ok = QInputDialog.getText(self, "新建文件夹", "文件夹名（例如 NCE1、L1-L2）")
+        if not ok or not name.strip():
+            return
+        fid = self.lib.create_folder(name, par)
+        if fid is None:
+            self._warn("新建文件夹", f"这里已经有叫「{name.strip()}」的文件夹了。")
+            return
+        self.refresh_packs((K_FOLDER, fid))
+
+    def new_pack(self, folder=False):
+        if not self.lib:
+            return
+        fid = self._sel_folder() if folder is False else folder
+        where = SEP.join(self.lib.folder_path(fid)) if fid is not None else "最外层（未分类）"
+        name, ok = QInputDialog.getText(self, "新建采集包", f"包名（一般用句型，例如 is this your…）\n放进：{where}",
+                                        text=self.active_pattern or "")
+        if not ok or not name.strip():
+            return
+        pid = self.lib.create_pack(name, fid)
+        if pid is None:
+            self._warn("新建采集包", f"「{where}」里已经有叫「{name.strip()}」的采集包了。")
+            return
+        self.refresh_packs((K_PACK, pid))
+
+    def rename_pack(self):
+        sel = self.pack_tree.current()
+        if not sel:
+            return
+        kind, id_ = sel
+        old = (self.lib.pack(id_) if kind == K_PACK else self.lib.folder(id_))["name"]
+        what = "采集包" if kind == K_PACK else "文件夹"
+        name, ok = QInputDialog.getText(self, f"重命名{what}", f"新{what}名", text=old)
+        name = (name or "").strip()
+        if not ok or not name or name == old:
+            return
+        ok = self.lib.rename_pack(id_, name) if kind == K_PACK else self.lib.rename_folder(id_, name)
+        if not ok:
+            self._warn(f"重命名{what}", f"同一个文件夹里已经有叫「{name}」的{what}了，换个名字吧。")
+            return
+        self.refresh_packs(sel)
+        self.toast.pop(f"已改名为「{name}」", True, "✓  ")
+
+    def _warn(self, title, text):
+        if getattr(self, "_test_warn", None) is not None:        # 自测：不弹窗，记下来
+            self._test_warn.append(text)
+            return
+        QMessageBox.warning(self, title, text)
+
+    def _ask(self, title, text, info, ok_text="删除"):
+        box = QMessageBox(QMessageBox.Warning, title, text, QMessageBox.NoButton, self)
+        box.setInformativeText(info)
+        b_del = box.addButton(ok_text, QMessageBox.DestructiveRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(box.buttons()[-1])
+        if getattr(self, "_test_confirm", None) is not None:      # 自测用：不弹窗，直接给答案
+            return self._test_confirm
+        box.exec()
+        return box.clickedButton() is b_del
+
+    def delete_pack(self):
+        sel = self.pack_tree.current()
+        if not sel:
+            return
+        kind, id_ = sel
+        if kind == K_PACK:
+            name = self.lib.pack(id_)["name"]
+            n = self.lib.pack_count(id_)
+            if not self._ask("删除采集包", f"确定删除采集包「{name}」吗？（里面有 {n} 条）",
+                             "只删这个包和里面的条目列表，\n视频、字幕、选区和导出的文件都不动。\n删除后不能撤销。"):
+                return
+            self.lib.delete_pack(id_)
+        else:
+            name = self.lib.folder(id_)["name"]
+            st = self.lib.folder_stats(id_)
+            if st["packs"] or st["folders"]:
+                txt = (f"确定删除文件夹「{name}」吗？里面的 {st['folders']} 个子文件夹、{st['packs']} 个采集包"
+                       f"（共 {st['items']} 条）会一起删除。")
+            else:
+                txt = f"确定删除空文件夹「{name}」吗？"
+            if not self._ask("删除文件夹", txt, "只删文件夹和采集包列表，\n视频、字幕、选区和导出的文件都不动。\n删除后不能撤销。"):
+                return
+            self.lib.delete_folder(id_)
+        self.page_sel = None
+        self.refresh_packs()
+        self.toast.pop(f"已删除「{name}」", True, "✓  ")
+
+    def _tree_moved(self, kind, id_, parent, index):
+        ok = self.lib.move_pack(id_, parent, index) if kind == K_PACK else self.lib.move_folder(id_, parent, index)
+        if not ok:
+            self.toast.pop("挪不过去：目标里已有同名的，或不能挪到自己里面", False)
+        self.refresh_packs((kind, id_))
+
+    def _tree_menu(self, pos):
+        it = self.pack_tree.itemAt(pos)
+        m = QMenu(self)
+        if it is None:
+            m.addAction("新建文件夹…", lambda: self.new_folder(None))
+            m.addAction("新建采集包…", lambda: self.new_pack(None))
+        else:
+            self.pack_tree.setCurrentItem(it)
+            kind, id_ = it.data(0, Qt.UserRole)
+            if kind == K_FOLDER:
+                m.addAction("新建子文件夹…", lambda: self.new_folder(id_))
+                m.addAction("在此新建采集包…", lambda: self.new_pack(id_))
+                m.addSeparator()
+            m.addAction("重命名…", self.rename_pack)
+            m.addAction("删除…", self.delete_pack)
+            m.addSeparator()
+            m.addAction("导出…" if kind == K_FOLDER else "导出此包…", self.export_pack)
+        m.exec(self.pack_tree.viewport().mapToGlobal(pos))
+
+    # ---------- 采集包页：右边
     def load_pack(self):
         self.pack_list.clear()
-        pid = self.pack_cb.currentData()
-        if pid is None or not self.lib:
+        sel = self.pack_tree.current() if self.lib else None
+        self.page_sel = sel
+        is_pack = bool(sel) and sel[0] == K_PACK
+        for b_ in (self.b_pack_up, self.b_pack_down, self.b_pack_rm):
+            b_.setVisible(is_pack)
+        self.b_pack_export.setText("导出此包" if is_pack else "导出文件夹")
+        self.b_pack_export.setEnabled(bool(sel))
+        if not sel:
+            self.pack_crumb.setText(""); self.pack_title.setText("还没有采集包"); self.pack_meta.setText("")
+            self.pack_hint.setText("在剪辑页搜索句型后点「收藏」，会自动建一个和句型同名的包")
             self._sync_pack_count()
             return
-        for r in self.lib.pack_items(pid):
+        kind, id_ = sel
+        if kind == K_FOLDER:
+            path = self.lib.folder_path(id_)
+            st = self.lib.folder_stats(id_)
+            self.pack_crumb.setText(SEP.join(path[:-1]) + (SEP if len(path) > 1 else ""))
+            self.pack_title.setText(path[-1] if path else "")
+            self.pack_meta.setText(f"{st['folders']} 个文件夹 · {st['packs']} 包 · {st['items']} 条")
+            self.pack_hint.setText("选一个采集包看里面的片段；「导出文件夹」会把下面所有包按同样的层级导出")
+            self._sync_pack_count()
+            return
+        path = self.lib.pack_path(id_)
+        crumb = SEP.join(path[:-1]) + SEP if len(path) > 1 else "未分类" + SEP
+        self.pack_crumb.setText(crumb)
+        self.pack_title.setText(path[-1] if path else "")
+        total = 0.0
+        for r in self.lib.pack_items(id_):
             lb = f"{r['show']} S{r['season']:02d}E{r['episode']:02d}" if r["kind"] == "tv" else r["show"]
-            it = QListWidgetItem(f"{self.pack_list.count() + 1:>3}.  {lb}　{r['en']}" + (f"\n{'':>6}{r['zh']}" if r["zh"] else ""))
+            try:
+                s0, e0, _ = self.lib.final_span(r, r["media_key"])
+            except Exception:
+                s0, e0 = r["start"], r["end"]
+            total += max(0.0, e0 - s0)
+            it = QListWidgetItem(f"{r['en']}")
             it.setData(Qt.UserRole, r["id"])
             it.setData(Qt.UserRole + 1, (r["media_key"], r["idx"]))
+            it.setData(Qt.UserRole + 2, dict(en=r["en"], zh=r["zh"] or "", source=lb, dur=f"{e0 - s0:.1f} 秒"))
+            it.setToolTip(f"{lb}\n{r['en']}" + (f"\n{r['zh']}" if r["zh"] else ""))
             self.pack_list.addItem(it)
+        self.pack_meta.setText(f"{self.pack_list.count()} 条 · 共 {total:.1f} 秒")
+        self.pack_hint.setText("双击一条在剪辑页打开；拖动排序")
         self._sync_pack_count()
 
     def _sync_pack_count(self):
         lb = getattr(self, "pack_n_lb", None)
         if lb is not None:
-            n = self.pack_list.count() if self.pack_cb.currentData() is not None else 0
-            lb.setText(f"{n} 条")
+            pid = self.fav_pack_id if self.active_pattern else None
+            lb.setText(f"{self.lib.pack_count(pid) if (pid is not None and self.lib) else 0} 条")
+
+    def _cur_page_pack(self):
+        sel = self.pack_tree.current()
+        return sel[1] if sel and sel[0] == K_PACK else None
 
     def _pack_move(self, d):
         it = self.pack_list.currentItem()
-        if it:
+        if it and self._cur_page_pack() is not None:
             row = self.pack_list.currentRow()
             self.lib.move_item(it.data(Qt.UserRole), d)
             self.load_pack()
             self.pack_list.setCurrentRow(max(0, min(self.pack_list.count() - 1, row + d)))
+
+    def _pack_reordered(self, ids):
+        pid = self._cur_page_pack()
+        if pid is not None:
+            self.lib.set_item_order(pid, ids)
+            self.pack_list.viewport().update()
 
     def _pack_remove(self):
         it = self.pack_list.currentItem()
         if it:
             self.lib.remove_item(it.data(Qt.UserRole))
             self.load_pack()
+            self._update_tree_counts()
+
+    def _update_tree_counts(self):
+        sel = self.pack_tree.current()
+        if sel and sel[0] == K_PACK:
+            it = self.pack_tree.items.get(sel)
+            if it is not None:
+                it.setText(1, str(self.lib.pack_count(sel[1])))
 
     def _pack_pick(self, it):
         key, idx = it.data(Qt.UserRole + 1)
@@ -1880,18 +2226,47 @@ class MainWindow(QMainWindow):
         return self.lib.get_setting("export_dir", "") or str(self.lib.root / "导出")
 
     def export_pack(self):
+        """导出选中的包 / 整个文件夹：目录 = 导出根/文件夹层级/包名/*.mp4（只出视频）。"""
         self._flush_cut()
-        pid = self.pack_cb.currentData()
-        if pid is None:
+        sel = self.pack_tree.current() if self.lib else None
+        if not sel:
             return
-        name = self.pack_cb.currentText()
-        n = self.pack_list.count()
-        if not n:
-            return
-        from ..export import safe_name
-        dlg = ExportDialog(f"采集包「{name}」", n, str(Path(self._export_dir()) / safe_name(name)), self)
-        if dlg.exec():
-            self._run_export(f"采集包「{name}」", dlg.dir.text(), dlg.presets(), dlg.comp.isChecked(), pack_id=pid)
+        from .. import jobs
+        from ..export import dir_name
+        kind, id_ = sel
+        root = Path(self._export_dir())
+        if kind == K_PACK:
+            n = self.lib.pack_count(id_)
+            if not n:
+                return
+            path = self.lib.pack_path(id_)
+            title = f"采集包「{SEP.join(path)}」"
+            dlg = ExportDialog(title, n, str(jobs.pack_dir(self.lib, id_, root)), self)
+            if self._test_export_dlg(dlg):
+                out = Path(dlg.dir.text())
+                self._run_export(title, str(out), dlg.presets(), False, pack_jobs=[(id_, out)])
+        else:
+            fpath = self.lib.folder_path(id_)
+            under = self.lib.packs_under(id_)
+            n = sum(self.lib.pack_count(pid) for pid, _ in under)
+            if not n:
+                self.toast.pop("这个文件夹里还没有片段", False)
+                return
+            title = f"文件夹「{SEP.join(fpath)}」（{len(under)} 个包）"
+            dlg = ExportDialog(title, n, str(root.joinpath(*[dir_name(x) for x in fpath])), self)
+            if self._test_export_dlg(dlg):
+                out = Path(dlg.dir.text())
+                jobs_ = [(pid, out.joinpath(*[dir_name(x) for x in rel])) for pid, rel in under]
+                self._run_export(title, str(out), dlg.presets(), False, pack_jobs=jobs_)
+
+    def _test_export_dlg(self, dlg):
+        t = getattr(self, "_test_export", None)
+        if t is not None:          # 自测：不弹窗，按给的目录直接导
+            dlg.dir.setText(t)
+            ok = True
+        else:
+            ok = bool(dlg.exec())
+        return ok
 
     def export_one(self, h):
         self._flush_cut()          # 1.3.0：调过的选区自动生效，不再问
@@ -1901,14 +2276,15 @@ class MainWindow(QMainWindow):
                          matched=h.matched, name=dlg.name())]
             self._run_export(f"{h.label} · {h.en[:30]}", dlg.dir.text(), dlg.presets(), False, items=spec)
 
-    def _run_export(self, title, out, presets, comp, pack_id=None, items=None):
+    def _run_export(self, title, out, presets, comp, pack_id=None, items=None, pack_jobs=None):
         if not presets:
             return
+        self.lib.mark_export_dir(out)          # 1.3.4：导出只出视频，导出过的文件夹记在库里，扫描时跳过
         it = QListWidgetItem(f"⏳ {title}　准备中…")
         it.setData(Qt.UserRole, out)
         self.tasks.insertItem(0, it)
         self.nav[P_TASKS].setText("导出任务 ·")
-        w = ExportWorker(str(self.lib.root), items or [], out, presets, self.style(), comp, pack_id)
+        w = ExportWorker(str(self.lib.root), items or [], out, presets, self.style(), comp, pack_id, pack_jobs)
         w.progress.connect(lambda n, t, s, it=it: it.setText(f"⏳ {title}　{n}/{t}　{s}"))
         w.finished_ok.connect(lambda r, it=it: self._export_done(it, title, r))
         self.export_workers.append(w)

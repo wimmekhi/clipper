@@ -46,7 +46,13 @@ CREATE TABLE IF NOT EXISTS adjust(
   PRIMARY KEY(media_key, idx)
 );
 CREATE TABLE IF NOT EXISTS packs(
-  id INTEGER PRIMARY KEY, name TEXT UNIQUE, created REAL
+  id INTEGER PRIMARY KEY, name TEXT, created REAL,
+  folder_id INTEGER,            -- 1.3.4：所在文件夹，NULL = 最外层（未分类）
+  sort INTEGER DEFAULT 0
+);
+-- 1.3.4：采集包文件夹，可以无限套娃（常用三级，例如 NCE1/L1-L2/is this your…）
+CREATE TABLE IF NOT EXISTS folders(
+  id INTEGER PRIMARY KEY, parent_id INTEGER, name TEXT, sort INTEGER DEFAULT 0, created REAL
 );
 CREATE TABLE IF NOT EXISTS pack_items(
   id INTEGER PRIMARY KEY, pack_id INTEGER, media_key TEXT, idx INTEGER,
@@ -171,8 +177,29 @@ class Library:
         have = {r[1] for r in db.execute("PRAGMA table_info(media)")}
         if "sub_changed" not in have:
             db.execute("ALTER TABLE media ADD COLUMN sub_changed INTEGER DEFAULT 0")
+        self._migrate_packs(db)
         db.commit()
         return db
+
+    @staticmethod
+    def _migrate_packs(db):
+        """1.3.4：包名不再全局唯一（同名包可以在不同文件夹里），加 folder_id / sort。老包全部放最外层。"""
+        sql = (db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='packs'").fetchone() or [""])[0]
+        cols = {r[1] for r in db.execute("PRAGMA table_info(packs)")}
+        if "UNIQUE" in sql.upper() or "folder_id" not in cols:
+            db.execute("CREATE TABLE packs_v134(id INTEGER PRIMARY KEY, name TEXT, created REAL, "
+                       "folder_id INTEGER, sort INTEGER DEFAULT 0)")
+            db.execute("INSERT INTO packs_v134(id,name,created,folder_id,sort) "
+                       "SELECT id,name,created,NULL,0 FROM packs ORDER BY created, id")
+            db.execute("DROP TABLE packs")
+            db.execute("ALTER TABLE packs_v134 RENAME TO packs")
+            n = 0
+            for r in db.execute("SELECT id FROM packs ORDER BY created, id").fetchall():
+                n += 1
+                db.execute("UPDATE packs SET sort=? WHERE id=?", (n, r[0]))
+        db.execute("CREATE INDEX IF NOT EXISTS packs_folder ON packs(folder_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS folders_parent ON folders(parent_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS pack_items_pack ON pack_items(pack_id, pos)")
 
     # ---------- 路径 ----------
     def abs(self, rel: str | None) -> Path | None:
@@ -201,6 +228,9 @@ class Library:
         d = (self.get_setting("export_dir", "") or "").strip()
         if d:
             out.append(Path(d))
+        # 1.3.4：导出只出视频（没有「说明」/ manifest 可认），导出过的文件夹记在库里
+        for m in self.get_setting("export_marks", []) or []:
+            out.append(Path(m) if Path(m).is_absolute() else self.root / m)
         res = []
         for x in out:
             try:
@@ -210,6 +240,24 @@ class Library:
             if x != self.root.resolve():
                 res.append(x)
         return res
+
+    def mark_export_dir(self, d) -> None:
+        """记下这个导出文件夹：以后扫描媒体库跳过它（在媒体库里面的存相对路径，换盘符也认）。"""
+        try:
+            p = Path(d).resolve()
+            root = self.root.resolve()
+        except Exception:
+            return
+        if p == root:
+            return
+        try:
+            v = p.relative_to(root).as_posix()
+        except ValueError:
+            return                      # 不在媒体库里：本来就扫不到
+        if any(p == x or x in p.parents for x in self.export_dirs()):
+            return                      # 已经在导出文件夹里面了
+        marks = [m for m in (self.get_setting("export_marks", []) or []) if m != v]
+        self.set_setting("export_marks", marks + [v])
 
     def is_export_dir(self, d: Path, excl=None) -> bool:
         """导出产生的文件夹：设置的导出文件夹、预设名文件夹（横屏原画无损 等）、带「说明」/manifest.json 的导出目录。"""
@@ -582,25 +630,264 @@ class Library:
 
     # ---------- 采集包 ----------
     def packs(self):
+        """全部采集包（含 folder_id、条数 n），按文件夹内顺序。"""
         return self.db.execute(
-            "SELECT p.*, (SELECT COUNT(*) FROM pack_items i WHERE i.pack_id=p.id) n FROM packs p ORDER BY created").fetchall()
+            """SELECT p.*, COALESCE(c.n, 0) n FROM packs p
+               LEFT JOIN (SELECT pack_id, COUNT(*) n FROM pack_items GROUP BY pack_id) c ON c.pack_id=p.id
+               ORDER BY p.sort, p.created, p.id""").fetchall()
 
-    def pack_id(self, name: str) -> int:
-        r = self.db.execute("SELECT id FROM packs WHERE name=?", (name,)).fetchone()
-        if r:
-            return r[0]
-        cur = self.db.execute("INSERT INTO packs(name,created) VALUES(?,?)", (name, time.time()))
+    def pack(self, pack_id):
+        return self.db.execute("SELECT * FROM packs WHERE id=?", (pack_id,)).fetchone()
+
+    def pack_count(self, pack_id) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM pack_items WHERE pack_id=?", (pack_id,)).fetchone()[0]
+
+    @staticmethod
+    def _clean_name(name: str) -> str:
+        """存进库的名字：去首尾空白、连续空白合一、... 写成 …（/ 是路径分隔符，换成全角）。"""
+        s = (name or "").replace("...", "…").replace("/", "／")
+        return re.sub(r"\s+", " ", s).strip()
+
+    @staticmethod
+    def norm_name(name: str) -> str:
+        """1.3.4 包名 / 句型匹配键：去首尾空白、连续空白合一、不分大小写、... ≡ …。"""
+        s = (name or "").replace("／", "/").replace("...", "…").replace("。。。", "…")
+        s = re.sub(r"\s*…\s*", "…", s)          # 「your…」和「your …」算同一个
+        return re.sub(r"\s+", " ", s).strip().lower()
+
+    def packs_named(self, pattern: str) -> list[int]:
+        """和句型同名的包（可能在不同文件夹里有好几个）：最近用过的排前面，其次最近收藏过 / 新建的。"""
+        k = self.norm_name(pattern)
+        if not k:
+            return []
+        rows = self.db.execute(
+            """SELECT p.id, p.name, p.created, (SELECT MAX(added) FROM pack_items i WHERE i.pack_id=p.id) last
+               FROM packs p""").fetchall()
+        ids = [r for r in rows if self.norm_name(r["name"]) == k]
+        rec = self.get_setting("recent_packs", []) or []
+        rank = {pid: n for n, pid in enumerate(rec)}
+        ids.sort(key=lambda r: (rank.get(r["id"], 1 << 30), -(r["last"] or r["created"] or 0)))
+        return [r["id"] for r in ids]
+
+    def set_item_order(self, pack_id: int, item_ids: list[int]):
+        """拖动排序后：按给的顺序重写 pos。"""
+        self.db.executemany("UPDATE pack_items SET pos=? WHERE id=? AND pack_id=?",
+                            [(n + 1, i, pack_id) for n, i in enumerate(item_ids)])
+        self.db.commit()
+
+    def _next_sort(self, table: str, col: str, parent) -> int:
+        r = self.db.execute(f"SELECT COALESCE(MAX(sort),0)+1 FROM {table} WHERE {col} IS ?", (parent,)).fetchone()
+        return r[0]
+
+    def find_pack(self, name: str, folder_id=None):
+        """同一文件夹里同名的包（按 norm_name 比：大小写、空白、... ≡ … 都算同名）。"""
+        k = self.norm_name(name)
+        for r in self.db.execute("SELECT id, name FROM packs WHERE folder_id IS ?", (folder_id,)):
+            if self.norm_name(r[1]) == k:
+                return r[0]
+        return None
+
+    def create_pack(self, name: str, folder_id=None):
+        """在文件夹里新建采集包；同一文件夹里已有同名包返回 None。"""
+        name = self._clean_name(name)
+        if not name or self.find_pack(name, folder_id) is not None:
+            return None
+        cur = self.db.execute("INSERT INTO packs(name,created,folder_id,sort) VALUES(?,?,?,?)",
+                              (name, time.time(), folder_id, self._next_sort("packs", "folder_id", folder_id)))
         self.db.commit()
         return cur.lastrowid
 
-    def add_to_pack(self, pack: str, key: str, idx: int, pattern="", tier="") -> bool:
-        pid = self.pack_id(pack)
+    def pack_id(self, name: str, folder_id=None) -> int:
+        """按名字取包（没有就建）；不给文件夹 = 最外层。"""
+        name = self._clean_name(name)
+        pid = self.find_pack(name, folder_id)
+        return pid if pid is not None else self.create_pack(name, folder_id)
+
+    def add_to_pack(self, pack, key: str, idx: int, pattern="", tier="") -> bool:
+        """pack：包 id，或包名（最外层，没有就建）。"""
+        pid = pack if isinstance(pack, int) else self.pack_id(pack)
         pos = self.db.execute("SELECT COALESCE(MAX(pos),0)+1 FROM pack_items WHERE pack_id=?", (pid,)).fetchone()[0]
         cur = self.db.execute(
             "INSERT OR IGNORE INTO pack_items(pack_id,media_key,idx,pattern,tier,pos,added) VALUES(?,?,?,?,?,?,?)",
             (pid, key, idx, pattern, tier, pos, time.time()))
         self.db.commit()
         return cur.rowcount > 0
+
+    # ---------- 采集包文件夹（1.3.4） ----------
+    def folders(self):
+        return self.db.execute("SELECT * FROM folders ORDER BY sort, created, id").fetchall()
+
+    def folder(self, fid):
+        return self.db.execute("SELECT * FROM folders WHERE id=?", (fid,)).fetchone()
+
+    def find_folder(self, name: str, parent_id=None):
+        k = self.norm_name(name)
+        for r in self.db.execute("SELECT id, name FROM folders WHERE parent_id IS ?", (parent_id,)):
+            if self.norm_name(r[1]) == k:
+                return r[0]
+        return None
+
+    def create_folder(self, name: str, parent_id=None):
+        """新建文件夹；同一层已有同名文件夹返回 None。"""
+        name = self._clean_name(name)
+        if not name or self.find_folder(name, parent_id) is not None:
+            return None
+        if parent_id is not None and self.folder(parent_id) is None:
+            return None
+        cur = self.db.execute("INSERT INTO folders(parent_id,name,sort,created) VALUES(?,?,?,?)",
+                              (parent_id, name, self._next_sort("folders", "parent_id", parent_id), time.time()))
+        self.db.commit()
+        return cur.lastrowid
+
+    def ensure_folder_path(self, path) -> int | None:
+        """按路径（"NCE1/L1-L2" 或 ["NCE1","L1-L2"]）取文件夹，没有就逐级建。"""
+        parts = [p for p in (path.split("/") if isinstance(path, str) else path) if p.strip()]
+        fid = None
+        for p in parts:
+            nxt = self.find_folder(self._clean_name(p), fid)
+            fid = nxt if nxt is not None else self.create_folder(p, fid)
+        return fid
+
+    def rename_folder(self, fid: int, name: str) -> bool:
+        name = self._clean_name(name)
+        f = self.folder(fid)
+        if not f or not name:
+            return False
+        other = self.find_folder(name, f["parent_id"])
+        if other is not None and other != fid:
+            return False
+        self.db.execute("UPDATE folders SET name=? WHERE id=?", (name, fid))
+        self.db.commit()
+        return True
+
+    def subfolder_ids(self, fid) -> list[int]:
+        """fid 自己和它下面所有层的文件夹 id。"""
+        out, todo = [], [fid]
+        kids: dict = {}
+        for r in self.db.execute("SELECT id, parent_id FROM folders"):
+            kids.setdefault(r[1], []).append(r[0])
+        while todo:
+            x = todo.pop()
+            out.append(x)
+            todo += kids.get(x, [])
+        return out
+
+    def folder_stats(self, fid) -> dict:
+        """文件夹下（递归）有几个子文件夹、几个包、几条。"""
+        ids = self.subfolder_ids(fid)
+        q = ",".join("?" * len(ids))
+        packs = [r[0] for r in self.db.execute(f"SELECT id FROM packs WHERE folder_id IN ({q})", ids)]
+        items = 0
+        if packs:
+            items = self.db.execute("SELECT COUNT(*) FROM pack_items WHERE pack_id IN (%s)" % ",".join("?" * len(packs)),
+                                    packs).fetchone()[0]
+        return dict(folders=len(ids) - 1, packs=len(packs), items=items, pack_ids=packs)
+
+    def delete_folder(self, fid: int) -> dict:
+        """删除文件夹和下面所有子文件夹、采集包（只删包，视频 / 微调 / 导出的文件都不动）。"""
+        st = self.folder_stats(fid)
+        ids = self.subfolder_ids(fid)
+        for pid in st["pack_ids"]:
+            self.db.execute("DELETE FROM pack_items WHERE pack_id=?", (pid,))
+            self.db.execute("DELETE FROM packs WHERE id=?", (pid,))
+        self.db.executemany("DELETE FROM folders WHERE id=?", [(i,) for i in ids])
+        self.db.commit()
+        return st
+
+    def _reorder(self, table: str, col: str, parent, row_id: int, index):
+        """把 row_id 放到同层第 index 个（None = 最后），重排 sort。"""
+        ids = [r[0] for r in self.db.execute(
+            f"SELECT id FROM {table} WHERE {col} IS ? AND id!=? ORDER BY sort, created, id", (parent, row_id))]
+        if index is None or index > len(ids):
+            index = len(ids)
+        ids.insert(max(0, index), row_id)
+        self.db.executemany(f"UPDATE {table} SET sort=? WHERE id=?", [(n + 1, i) for n, i in enumerate(ids)])
+
+    def move_pack(self, pack_id: int, folder_id=None, index=None) -> bool:
+        """把包挪到文件夹（None = 最外层）的第 index 个位置；目标文件夹里有同名包就不挪，返回 False。"""
+        p = self.pack(pack_id)
+        if not p or (folder_id is not None and self.folder(folder_id) is None):
+            return False
+        other = self.find_pack(p["name"], folder_id)
+        if other is not None and other != pack_id:
+            return False
+        self.db.execute("UPDATE packs SET folder_id=? WHERE id=?", (folder_id, pack_id))
+        self._reorder("packs", "folder_id", folder_id, pack_id, index)
+        self.db.commit()
+        return True
+
+    def move_folder(self, fid: int, parent_id=None, index=None) -> bool:
+        """挪文件夹；不能挪到自己或自己的子孙下面，目标层有同名文件夹也不挪。"""
+        f = self.folder(fid)
+        if not f:
+            return False
+        if parent_id is not None and (parent_id in self.subfolder_ids(fid) or self.folder(parent_id) is None):
+            return False
+        other = self.find_folder(f["name"], parent_id)
+        if other is not None and other != fid:
+            return False
+        self.db.execute("UPDATE folders SET parent_id=? WHERE id=?", (parent_id, fid))
+        self._reorder("folders", "parent_id", parent_id, fid, index)
+        self.db.commit()
+        return True
+
+    def folder_path(self, fid) -> list[str]:
+        """文件夹的路径（从最外层起的名字列表）。"""
+        names, seen = [], set()
+        while fid is not None and fid not in seen:
+            seen.add(fid)
+            f = self.folder(fid)
+            if not f:
+                break
+            names.append(f["name"])
+            fid = f["parent_id"]
+        return names[::-1]
+
+    def pack_path(self, pack_id) -> list[str]:
+        p = self.pack(pack_id)
+        if not p:
+            return []
+        return self.folder_path(p["folder_id"]) + [p["name"]]
+
+    def pack_by_path(self, path):
+        """按路径取包："NCE1/L1-L2/is this your…" 或列表；最后一段是包名。找不到返回 None。"""
+        parts = [p for p in (path.split("/") if isinstance(path, str) else path) if p.strip()]
+        if not parts:
+            return None
+        fid = None
+        for p in parts[:-1]:
+            fid = self.find_folder(self._clean_name(p), fid)
+            if fid is None:
+                return None
+        return self.find_pack(self._clean_name(parts[-1]), fid)
+
+    def packs_under(self, fid) -> list[tuple[int, list[str]]]:
+        """文件夹下（递归）所有包：[(包 id, 相对这个文件夹的路径（含包名）)]，按树的顺序。"""
+        folders = self.folders()
+        kids: dict = {}
+        for f in folders:
+            kids.setdefault(f["parent_id"], []).append(f)
+        packs: dict = {}
+        for p in self.packs():
+            packs.setdefault(p["folder_id"], []).append(p)
+        out = []
+
+        def walk(f_id, rel):
+            for f in kids.get(f_id, []):
+                walk(f["id"], rel + [f["name"]])
+            for p in packs.get(f_id, []):
+                out.append((p["id"], rel + [p["name"]]))
+        walk(fid, [])
+        return out
+
+    def recent_packs(self) -> list[int]:
+        ids = self.get_setting("recent_packs", []) or []
+        have = {r[0] for r in self.db.execute("SELECT id FROM packs")}
+        return [i for i in ids if i in have][:5]
+
+    def touch_recent_pack(self, pack_id: int):
+        ids = [i for i in (self.get_setting("recent_packs", []) or []) if i != pack_id]
+        self.set_setting("recent_packs", [pack_id] + ids[:9])
 
     def pack_items(self, pack_id: int):
         return self.db.execute(
@@ -623,12 +910,13 @@ class Library:
             self.db.commit()
 
     def rename_pack(self, pack_id: int, name: str) -> bool:
-        """改包名；新名字已被别的包用了就返回 False。"""
-        name = name.strip()
-        if not name:
+        """改包名；同一文件夹里新名字已被别的包用了就返回 False。"""
+        name = self._clean_name(name)
+        p = self.pack(pack_id)
+        if not name or not p:
             return False
-        r = self.db.execute("SELECT id FROM packs WHERE name=?", (name,)).fetchone()
-        if r and r[0] != pack_id:
+        other = self.find_pack(name, p["folder_id"])
+        if other is not None and other != pack_id:
             return False
         self.db.execute("UPDATE packs SET name=? WHERE id=?", (name, pack_id))
         self.db.commit()
