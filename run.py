@@ -517,9 +517,11 @@ def _result_row_tests(w, app, root):
     w.results.setFixedHeight(260)          # 视口矮一点，40 条一定能滚
 
     def flush():
-        for _ in range(3):
+        t0 = time.time()
+        while time.time() - t0 < 0.05:          # 让延迟布局（0ms 定时器）跑完
             app.processEvents()
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            time.sleep(0.005)
         app.processEvents()
 
     def check(tag):
@@ -539,9 +541,11 @@ def _result_row_tests(w, app, root):
         vis = [r for r in live if r.isVisible() and r.geometry().intersects(vp.rect())]   # 视口里看得见的
         stray = [r for r in vis if r not in rows]
         assert not stray, f"{tag}：视口里浮着 {len(stray)} 条不属于列表的旧行（{[r.hit.en for r in stray][:2]}）"
+        # 整行都在视口里的必须看得见（边上只露出间距的那行各平台字体高度不同，不强求）
         want = [r for r, it in zip(widgets, items) if isinstance(r, ResultRow) and not it.isHidden()
-                and w.results.visualItemRect(it).intersects(vp.rect())]
-        assert set(map(id, vis)) == set(map(id, want)), f"{tag}：视口里可见 {len(vis)} 行，应为 {len(want)} 行"
+                and vp.rect().contains(w.results.visualItemRect(it))]
+        miss = [r for r in want if not r.isVisible()]
+        assert (want or not rows) and not miss, f"{tag}：视口里应完整显示 {len(want)} 行，其中 {len(miss)} 行看不见"
         return len(rows)
 
     sb = w.results.verticalScrollBar()
